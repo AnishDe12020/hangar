@@ -1,6 +1,6 @@
 local U = require('hangar-config')
 -- Hangar: AeroSpace owns windows; Hammerspoon owns utility shortcuts.
-local M = {version = '2026.10.05.2'}
+local M = {version = '2026.10.05.3'}
 local cli = hs.fs.attributes('/opt/homebrew/bin/aerospace') and '/opt/homebrew/bin/aerospace' or '/usr/local/bin/aerospace'
 M.tasks = {}
 local function aero(args)
@@ -119,7 +119,7 @@ local function updateHoldMenu()
 end
 M.hold.setOnChange(updateHoldMenu)
 M.sessions.setOnChange(updateHoldMenu)
-M.sessions.setOpenCallback(function() M.openUtility('settings') end)
+M.sessions.setOpenCallback(function() M.openUtility('settings', 'sessions') end)
 local previousShutdown = hs.shutdownCallback
 hs.shutdownCallback = function()
   M.hold.shutdown()
@@ -127,16 +127,22 @@ hs.shutdownCallback = function()
   if previousShutdown then previousShutdown() end
 end
 M.palette = require("leanmac-palette")
-function M.openUtility(kind)
+function M.openUtility(kind, tab)
   if kind == 'shelf' and U.modules and U.modules.shelf == false then
     hs.alert.show('Apron is disabled in Hangar settings'); return
   end
   local bundle = kind == 'shelf' and 'HangarShelf.app' or 'HangarSettings.app'
   local program = kind == 'shelf' and hs.configdir .. '/bin/HangarShelf.app/Contents/MacOS/hangar-shelf' or '/usr/bin/open'
   local arguments = kind == 'shelf' and {'--wait', '--style', U.shelf_style or 'compact'} or {hs.configdir .. '/bin/' .. bundle}
+  if kind == 'settings' and tab == 'sessions' then
+    arguments = {hs.configdir .. '/bin/' .. bundle, '--args', '--tab', tab}
+  end
   local task
   task = hs.task.new(program, function(code, out, err)
     M.tasks[task] = nil
+    if code == 0 and kind == 'settings' and tab == 'sessions' then
+      hs.distributednotifications.post('local.hangar.settings.navigate', nil, {tab = tab})
+    end
     if code ~= 0 then hs.alert.show('Could not open ' .. bundle); hs.printf('Hangar: %s', err or out) end
   end, arguments)
   if task then M.tasks[task] = true; task:start() end
