@@ -2,7 +2,17 @@ import AppKit
 
 // Presentation only. Hammerspoon validates and executes every window operation.
 let dragType = NSPasteboard.PasteboardType("local.leanmac.windows")
-let accent = NSColor.systemMint
+let accent = NSColor(name: NSColor.Name("HangarAccent")) { appearance in
+    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        ? NSColor(calibratedRed: 0.40, green: 0.84, blue: 0.78, alpha: 1)
+        : NSColor(calibratedRed: 0.00, green: 0.42, blue: 0.40, alpha: 1)
+}
+let previewMode = CommandLine.arguments.contains("--render-preview")
+let hiddenMode = previewMode || CommandLine.arguments.contains("--self-test") || CommandLine.arguments.contains("--surface-check")
+if let index = CommandLine.arguments.firstIndex(of: "--render-preview"),
+   index+1 >= CommandLine.arguments.count || CommandLine.arguments[index+1].hasPrefix("--") {
+    fputs("Usage: --render-preview PATH [--dark|--light] [--empty] [--compact]\n", stderr); exit(2)
+}
 var testPackets: [[String:Any]]?
 func emit(_ value: [String: Any]) {
     if testPackets != nil { testPackets!.append(value); return }
@@ -25,7 +35,51 @@ final class Panel: NSPanel {
     override var canBecomeMain: Bool { true }
     override func cancelOperation(_ sender: Any?) { board.send("close") }
 }
-final class Flipped: NSView { override var isFlipped: Bool { true } }
+class Flipped: NSView { override var isFlipped: Bool { true } }
+final class Backdrop: Flipped {
+    override func draw(_ dirtyRect: NSRect) {
+        if previewMode || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
+            NSColor.windowBackgroundColor.setFill(); bounds.fill()
+        }
+        NSColor.separatorColor.withAlphaComponent(0.4).setFill()
+        NSRect(x: 24, y: bounds.height-65, width: max(0, bounds.width-48), height: 0.5).fill()
+    }
+}
+func materialSurface(_ content: NSView) -> NSView {
+    let surface: NSView
+    var embedsContent = false
+    if NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency || previewMode {
+        surface = NSView(frame: content.bounds)
+        surface.wantsLayer = true; surface.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    } else {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView(frame: content.bounds)
+            glass.style = .regular; glass.cornerRadius = 20; glass.contentView = content; embedsContent = true
+            surface = glass
+        } else {
+            let effect = NSVisualEffectView(frame: content.bounds)
+            effect.material = .underWindowBackground; effect.blendingMode = .behindWindow; effect.state = .active
+            surface = effect
+        }
+        #else
+        let effect = NSVisualEffectView(frame: content.bounds)
+        effect.material = .underWindowBackground; effect.blendingMode = .behindWindow; effect.state = .active
+        surface = effect
+        #endif
+    }
+    surface.autoresizingMask = [.width, .height]
+    if !embedsContent { surface.addSubview(content) }
+    content.autoresizingMask = [.width, .height]
+    return surface
+}
+func writePreview(_ view: NSView, to path: String) throws {
+    view.layoutSubtreeIfNeeded()
+    guard let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw NSError(domain: "HangarPreview", code: 1) }
+    view.cacheDisplay(in: view.bounds, to: image)
+    guard let data = image.representation(using: .png, properties: [:]) else { throw NSError(domain: "HangarPreview", code: 2) }
+    try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+}
 
 final class Tile: NSView, NSDraggingSource {
     let ids: [Int]
@@ -37,6 +91,9 @@ final class Tile: NSView, NSDraggingSource {
     var start = NSPoint.zero
     var dragged = false
     var target = false
+    var hovered = false
+    private var tracking: NSTrackingArea?
+    override var acceptsFirstResponder: Bool { !handle }
     override var isFlipped: Bool { true }
     init(frame: NSRect, ids: [Int], workspace: String, title: String, subtitle: String = "", icon: NSImage? = nil, handle: Bool = false) {
         self.ids=ids; self.workspace=workspace; self.title=title; self.subtitle=subtitle; self.icon=icon; self.handle=handle
@@ -48,18 +105,34 @@ final class Tile: NSView, NSDraggingSource {
     }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ rect: NSRect) {
-        let path=NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 11, yRadius: 11)
-        (handle ? accent.withAlphaComponent(0.12) : NSColor.controlBackgroundColor.withAlphaComponent(0.75)).setFill(); path.fill()
-        (target ? accent : NSColor.separatorColor.withAlphaComponent(0.45)).setStroke(); path.lineWidth=target ? 2 : 0.5; path.stroke()
+        let focused = window?.firstResponder === self
+        let path=NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: handle ? 10 : 14, yRadius: handle ? 10 : 14)
+        (handle ? NSColor.labelColor.withAlphaComponent(0.04) : NSColor.labelColor.withAlphaComponent(hovered ? 0.085 : 0.045)).setFill(); path.fill()
+        (target || focused ? accent : NSColor.separatorColor.withAlphaComponent(hovered ? 0.6 : 0.35)).setStroke()
+        path.lineWidth=target || focused ? 2 : 0.5; path.stroke()
         let p=NSMutableParagraphStyle(); p.lineBreakMode = .byTruncatingTail
-        let x: CGFloat = handle ? 12 : 58
-        if let icon=icon { icon.draw(in: NSRect(x: 12, y: 16, width: 34, height: 34), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil) }
-        (title as NSString).draw(in: NSRect(x:x,y:handle ? 8 : 15,width:bounds.width-x-10,height:20), withAttributes: [.font:NSFont.systemFont(ofSize:handle ? 11 : 12,weight:.semibold),.foregroundColor:handle ? accent : NSColor.labelColor,.paragraphStyle:p])
+        let x: CGFloat = handle ? 14 : 68
+        if let icon=icon { icon.draw(in: NSRect(x: 15, y: 11, width: 40, height: 40), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil) }
+        (title as NSString).draw(in: NSRect(x:x,y:handle ? 9 : 20,width:bounds.width-x-14,height:20), withAttributes: [.font:NSFont.systemFont(ofSize:handle ? 11 : 13,weight:.semibold),.foregroundColor:handle ? NSColor.secondaryLabelColor : NSColor.labelColor,.paragraphStyle:p])
         if !handle {
-            (subtitle as NSString).draw(in: NSRect(x:12,y:60,width:bounds.width-24,height:30),withAttributes:[.font:NSFont.systemFont(ofSize:10),.foregroundColor:NSColor.secondaryLabelColor,.paragraphStyle:p])
+            ((subtitle.isEmpty ? "Untitled window" : subtitle) as NSString).draw(in: NSRect(x:16,y:61,width:bounds.width-32,height:20),withAttributes:[.font:NSFont.systemFont(ofSize:12),.foregroundColor:NSColor.secondaryLabelColor,.paragraphStyle:p])
         }
     }
-    override func mouseDown(with event: NSEvent) { start=event.locationInWindow; dragged=false; board.pointerDown=true; board.pointer("down",ids) }
+    override func updateTrackingAreas() {
+        if let tracking = tracking { removeTrackingArea(tracking) }
+        tracking = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow], owner: self)
+        addTrackingArea(tracking!); super.updateTrackingAreas()
+    }
+    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+    override func becomeFirstResponder() -> Bool { needsDisplay = true; return true }
+    override func resignFirstResponder() -> Bool { needsDisplay = true; return true }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 76 || event.keyCode == 49 { board.send("focus", ["ids": ids]); return }
+        if [123, 124, 125, 126].contains(event.keyCode) { board.step(from: self, delta: [123, 126].contains(event.keyCode) ? -1 : 1); return }
+        super.keyDown(with: event)
+    }
+    override func mouseDown(with event: NSEvent) { if !handle { window?.makeFirstResponder(self) }; start=event.locationInWindow; dragged=false; board.pointerDown=true; board.pointer("down",ids) }
     override func acceptsFirstMouse(for event:NSEvent?) -> Bool { true }
     override func mouseDragged(with event: NSEvent) {
         guard !board.busy, !dragged, hypot(event.locationInWindow.x-start.x,event.locationInWindow.y-start.y)>5 else { return }
@@ -77,7 +150,7 @@ final class Tile: NSView, NSDraggingSource {
         beginDraggingSession(with:[dragging],event:event,source:self)
     }
     override func mouseUp(with event: NSEvent) { board.pointerDown=false; if !dragged && !handle { board.send("focus",["ids":ids]) };board.applyQueued() }
-    override func accessibilityPerformPress() -> Bool { board.send("focus",["ids":ids]); return true }
+    override func accessibilityPerformPress() -> Bool { guard !handle else { return false }; board.send("focus",["ids":ids]); return true }
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { context == .withinApplication ? .move : [] }
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) { board.pointerDown=false;board.dragging=false; board.applyQueued() }
     override func menu(for event: NSEvent) -> NSMenu? { board.menu(ids, workspace:workspace) }
@@ -101,6 +174,16 @@ final class Tile: NSView, NSDraggingSource {
         return true
     }
 }
+final class WorkspaceButton: NSButton {
+    var visible = false
+    override func draw(_ dirtyRect: NSRect) {
+        let text = NSAttributedString(string: title, attributes: [.font: NSFont.systemFont(ofSize: 14, weight: .semibold), .foregroundColor: visible ? accent : NSColor.labelColor])
+        text.draw(at: NSPoint(x: 5, y: (bounds.height-text.size().height)/2))
+        let arrow = NSImage(systemSymbolName: "arrow.up.right", accessibilityDescription: nil)?.withSymbolConfiguration(.init(paletteColors: [.tertiaryLabelColor]))
+        arrow?.isTemplate = false; arrow?.draw(in: NSRect(x: bounds.width-22, y: (bounds.height-11)/2, width: 11, height: 11))
+        if isHighlighted { NSColor.labelColor.withAlphaComponent(0.06).setFill(); NSBezierPath(roundedRect: bounds, xRadius: 7, yRadius: 7).fill() }
+    }
+}
 final class Lane: NSView {
     let workspace: String
     var target=false
@@ -108,7 +191,9 @@ final class Lane: NSView {
     init(frame:NSRect,workspace:String) { self.workspace=workspace; super.init(frame:frame); registerForDraggedTypes([dragType]) }
     required init?(coder:NSCoder) { fatalError() }
     override func draw(_ rect:NSRect) {
-        if target { accent.withAlphaComponent(0.1).setFill(); NSBezierPath(roundedRect:bounds,xRadius:12,yRadius:12).fill() }
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 16, yRadius: 16)
+        (target ? accent.withAlphaComponent(0.10) : NSColor.labelColor.withAlphaComponent(0.025)).setFill(); path.fill()
+        (target ? accent : NSColor.separatorColor.withAlphaComponent(0.20)).setStroke(); path.lineWidth = target ? 2 : 0.5; path.stroke()
     }
     override func draggingEntered(_ sender:NSDraggingInfo)->NSDragOperation { target=board.payload(sender) != nil; needsDisplay=true; return target ? .move : [] }
     override func draggingExited(_ sender:NSDraggingInfo?) { target=false; needsDisplay=true }
@@ -123,7 +208,11 @@ final class Lane: NSView {
 
 final class Board: NSObject, NSWindowDelegate, NSMenuDelegate {
     var panel: Panel!
-    var root=Flipped()
+    var root=Backdrop()
+    var deckScroll: NSScrollView?
+    var laneScrolls: [String:NSScrollView] = [:]
+    var windowTiles: [Tile] = []
+    var appearanceObserver: NSObjectProtocol?
     var status=label("Loading spaces…",size:11,color:.secondaryLabelColor)
     var model:[String:Any]=[:]
     var queued:[String:Any]?
@@ -137,20 +226,51 @@ final class Board: NSObject, NSWindowDelegate, NSMenuDelegate {
     var rows:[[String:Any]] { model["windows"] as? [[String:Any]] ?? [] }
     func start() {
         let args=CommandLine.arguments.dropFirst().compactMap(Double.init)
-        let f=args.count==4 ? NSRect(x:args[0],y:(NSScreen.screens.first?.frame.maxY ?? 900)-args[1]-args[3],width:args[2],height:args[3]) : NSRect(x:100,y:100,width:1100,height:670)
+        var f=args.count==4 ? NSRect(x:args[0],y:(NSScreen.screens.first?.frame.maxY ?? 900)-args[1]-args[3],width:args[2],height:args[3]) : NSRect(x:100,y:100,width:1100,height:670)
+        if previewMode && CommandLine.arguments.contains("--compact") { f.size=NSSize(width:720,height:520) }
+        if !previewMode, let screen = NSScreen.screens.first(where: { $0.frame.intersects(f) }) ?? NSScreen.main {
+            let area = screen.visibleFrame.insetBy(dx: 20, dy: 20)
+            f.size.width = min(f.width, area.width); f.size.height = min(f.height, area.height)
+            f.origin.x = min(max(f.minX, area.minX), area.maxX-f.width)
+            f.origin.y = min(max(f.minY, area.minY), area.maxY-f.height)
+        }
         panel=Panel(contentRect:f,styleMask:[.titled,.closable,.resizable,.utilityWindow],backing:.buffered,defer:false)
-        panel.title="Hangar Spaces";panel.titleVisibility = .hidden;panel.titlebarAppearsTransparent=true
-        panel.minSize=NSSize(width:820,height:470);panel.level = .floating;panel.hidesOnDeactivate=false
+        panel.title="Tower — Workspace overview";panel.titleVisibility = .hidden;panel.titlebarAppearsTransparent=true
+        panel.minSize=NSSize(width:min(680, f.width),height:min(450, f.height));panel.animationBehavior = .none;panel.level = .floating;panel.hidesOnDeactivate=false
         panel.isReleasedWhenClosed=false;panel.delegate=self
-        let effect=NSVisualEffectView(frame:NSRect(origin:.zero,size:f.size));effect.material = .popover;effect.blendingMode = .behindWindow;effect.state = .active
-        root.frame=effect.bounds;root.autoresizingMask=[.width,.height];effect.addSubview(root);panel.contentView=effect
-        render();panel.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)
+        // A default NSPanel is opaque even when its content is a glass view.
+        panel.isOpaque=false;panel.backgroundColor = .clear;panel.hasShadow=true
+        root.frame=NSRect(origin:.zero,size:f.size);panel.contentView=materialSurface(root)
+        appearanceObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            self.root.removeFromSuperview(); self.panel.contentView = materialSurface(self.root)
+        }
+        render()
+        if !hiddenMode { panel.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true) }
         emit(["action":"ready"])
     }
-    func icon(_ bundle:String)->NSImage? {
-        if let image=icons[bundle] { return image }
+    // Resolve the running app first: apps outside /Applications, helper hosts,
+    // and launchers are not always registered with LaunchServices. Never let a
+    // recycled PID override the bundle identity in the window snapshot.
+    func applicationIcon(_ row:[String:Any])->(image:NSImage, source:String)? {
+        let bundle = (row["bundle"] as? String ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
+        let name = row["app"] as? String ?? ""
+        if let rawPID=row["pid"] as? Int, rawPID>0, rawPID<=Int(Int32.max),
+           let running=NSRunningApplication(processIdentifier:pid_t(rawPID)), !running.isTerminated,
+           (!bundle.isEmpty ? running.bundleIdentifier == bundle : !name.isEmpty && running.localizedName == name) {
+            if let image=running.icon { return (image,"runningApplication") }
+            if let url=running.bundleURL { return (NSWorkspace.shared.icon(forFile:url.path),"runningBundleURL") }
+        }
+        guard !bundle.isEmpty else { return nil }
+        if let image=icons[bundle] { return (image,"bundleCache") }
         guard let url=NSWorkspace.shared.urlForApplication(withBundleIdentifier:bundle) else { return nil }
-        let image=NSWorkspace.shared.icon(forFile:url.path);image.size=NSSize(width:40,height:40);icons[bundle]=image;return image
+        let image=NSWorkspace.shared.icon(forFile:url.path);icons[bundle]=image
+        return (image,"bundleURL")
+    }
+    func icon(_ row:[String:Any])->NSImage? {
+        if let resolved=applicationIcon(row) { return resolved.image }
+        let fallback=NSImage(systemSymbolName:"macwindow",accessibilityDescription:nil)?.withSymbolConfiguration(.init(paletteColors:[.secondaryLabelColor]))
+        fallback?.isTemplate=false;return fallback
     }
     func button(_ title:String, frame:NSRect, _ run:@escaping ()->Void)->NSButton {
         let a=Action(run);actions.append(a)
@@ -158,43 +278,90 @@ final class Board: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
     func render() {
         guard panel != nil else { return }
-        let offsets=root.subviews.compactMap { $0 as? NSScrollView }.map { $0.contentView.bounds.origin.y }
-        root.subviews.forEach{$0.removeFromSuperview()};actions=[]
+        let horizontal = deckScroll?.contentView.bounds.origin.x ?? 0
+        let offsets = laneScrolls.mapValues { $0.contentView.bounds.origin.y }
+        let focusedID = (panel.firstResponder as? Tile)?.ids.first
+        root.subviews.forEach{$0.removeFromSuperview()};actions=[];laneScrolls=[:];windowTiles=[]
         let width=root.bounds.width,height=root.bounds.height
-        let heading=label("Spaces",size:22);heading.font = .systemFont(ofSize:22,weight:.semibold);heading.frame=NSRect(x:24,y:12,width:150,height:30);root.addSubview(heading)
-        let hint=label("Drag to move or pair   ·   Right-click for actions",size:11,color:.secondaryLabelColor);hint.frame=NSRect(x:180,y:23,width:width-310,height:20);root.addSubview(hint)
-        root.addSubview(button("Refresh",frame:NSRect(x:width-98,y:13,width:78,height:28)){self.send("refresh")})
-        let n=max(1,spaces.count),gap:CGFloat=12,margin:CGFloat=20
-        let col=(width-margin*2-gap*CGFloat(n-1))/CGFloat(n)
+        let heading=label("Tower",size:20);heading.font = .systemFont(ofSize:20,weight:.semibold)
+        heading.frame=NSRect(x:24,y:17,width:180,height:30);root.addSubview(heading)
+        let summary=label("\(spaces.count) workspaces  ·  \(rows.count) windows",size:12,color:.secondaryLabelColor)
+        summary.alignment = .right;summary.frame=NSRect(x:width-410,y:24,width:282,height:20);root.addSubview(summary)
+        let refresh=button("Refresh",frame:NSRect(x:width-108,y:17,width:84,height:30)){self.send("refresh")}
+        refresh.image=NSImage(systemSymbolName:"arrow.clockwise",accessibilityDescription:nil);refresh.imagePosition = .imageLeading
+        refresh.toolTip="Refresh workspaces and windows";root.addSubview(refresh)
+        let n=max(1,spaces.count),gap:CGFloat=14,margin:CGFloat=24
+        // Keep cards readable even with many workspaces or a small display.
+        let col=max(236,min(320,(width-margin*2-gap*CGFloat(n-1))/CGFloat(n)))
+        let deckWidth=max(width-margin*2,CGFloat(n)*(col+gap)-gap)
+        let deck=NSScrollView(frame:NSRect(x:margin,y:66,width:width-margin*2,height:max(180,height-144)))
+        deck.hasHorizontalScroller=true;deck.autohidesScrollers=true;deck.scrollerStyle = .overlay;deck.drawsBackground=false
+        let columns=Flipped(frame:NSRect(x:0,y:0,width:deckWidth,height:deck.bounds.height-12));deck.documentView=columns
+        deckScroll=deck;root.addSubview(deck)
         for (index,space) in spaces.enumerated() {
             guard let ws=space["id"] as? String else { continue }
-            let x=margin+CGFloat(index)*(col+gap)
-            let header=button(ws,frame:NSRect(x:x,y:57,width:36,height:30)){self.send("workspace",["target":ws])};header.font = .systemFont(ofSize:18,weight:.semibold);root.addSubview(header)
+            let x=CGFloat(index)*(col+gap),visible=space["visible"] as? Bool == true
+            let switchAction=Action { self.send("workspace",["target":ws]) };actions.append(switchAction)
+            let header=WorkspaceButton(title:"Workspace \(ws)",target:switchAction,action:#selector(Action.invoke))
+            header.frame=NSRect(x:x,y:0,width:col,height:32);header.visible=visible;header.isBordered=false
+            header.toolTip="Switch to workspace \(ws)";columns.addSubview(header)
             let monitor=(space["monitor"] as? String ?? "Display").replacingOccurrences(of:"Built-in Retina Display",with:"Mac display")
-            let subtitle=label(monitor,size:10,color:.secondaryLabelColor);subtitle.frame=NSRect(x:x+45,y:57,width:col-48,height:16);root.addSubview(subtitle)
+            let subtitle=label(monitor,size:11,color:.secondaryLabelColor);subtitle.frame=NSRect(x:x+5,y:35,width:col-10,height:17);columns.addSubview(subtitle)
             let members=rows.filter{$0["workspace"] as? String == ws}
-            let visible=space["visible"] as? Bool == true
-            let state=label((visible ? "●  " : "")+"\(members.count) windows",size:10,color:visible ? accent : .tertiaryLabelColor);state.frame=NSRect(x:x+45,y:73,width:col-48,height:16);root.addSubview(state)
-            let scroll=NSScrollView(frame:NSRect(x:x,y:98,width:col,height:height-143));scroll.hasVerticalScroller=true;scroll.autohidesScrollers=true;scroll.drawsBackground=false
+            let state=label((visible ? "●  Visible  ·  " : "")+"\(members.count) window\(members.count == 1 ? "" : "s")",size:10,color:visible ? accent : .secondaryLabelColor)
+            state.frame=NSRect(x:x+5,y:56,width:col-10,height:16);columns.addSubview(state)
+            let scroll=NSScrollView(frame:NSRect(x:x,y:84,width:col,height:max(80,columns.bounds.height-84)))
+            scroll.hasVerticalScroller=true;scroll.autohidesScrollers=true;scroll.scrollerStyle = .overlay;scroll.drawsBackground=false
             let lane=Lane(frame:NSRect(x:0,y:0,width:col,height:scroll.bounds.height),workspace:ws)
-            var y:CGFloat=0;var used=Set<Int>()
+            var y:CGFloat=8;var used=Set<Int>()
             for pair in model["pairs"] as? [[String:Any]] ?? [] where pair["workspace"] as? String == ws {
                 guard let ids=pair["ids"] as? [Int],ids.count==2,ids.allSatisfy({ id in members.contains{$0["id"] as? Int == id} }) else { continue }
-                let h=Tile(frame:NSRect(x:0,y:y,width:col,height:30),ids:ids,workspace:ws,title:"⠿  Linked pair",handle:true);lane.addSubview(h);y+=33
-                for (i,id) in ids.enumerated() {
+                let handle=Tile(frame:NSRect(x:8,y:y,width:col-16,height:32),ids:ids,workspace:ws,title:"Linked pair  ·  Drag together",handle:true)
+                lane.addSubview(handle);y+=38
+                for id in ids {
                     let row=members.first{$0["id"] as? Int == id}!
-                    lane.addSubview(tile(row,frame:NSRect(x:CGFloat(i)*(col+6)/2,y:y,width:(col-6)/2,height:96)));used.insert(id)
-                };y+=108
+                    let view=tile(row,frame:NSRect(x:8,y:y,width:col-16,height:94));lane.addSubview(view);windowTiles.append(view)
+                    y+=100;used.insert(id)
+                };y+=10
             }
-            for row in members { guard let id=row["id"] as? Int,!used.contains(id) else { continue };lane.addSubview(tile(row,frame:NSRect(x:0,y:y,width:col,height:96)));y+=105 }
-            let empty=label("Drop here",size:11,color:.tertiaryLabelColor);empty.alignment = .center;empty.frame=NSRect(x:0,y:y+16,width:col,height:20);lane.addSubview(empty);y+=80
-            lane.frame.size.height=max(y,scroll.bounds.height);scroll.documentView=lane;root.addSubview(scroll)
-            if index<offsets.count { scroll.contentView.scroll(to:NSPoint(x:0,y:min(offsets[index],max(0,y-scroll.bounds.height)))) }
+            for row in members {
+                guard let id=row["id"] as? Int,!used.contains(id) else { continue }
+                let view=tile(row,frame:NSRect(x:8,y:y,width:col-16,height:94));lane.addSubview(view);windowTiles.append(view);y+=102
+            }
+            if members.isEmpty {
+                let empty=label("No windows",size:13,color:.secondaryLabelColor);empty.alignment = .center
+                empty.frame=NSRect(x:10,y:45,width:col-20,height:22);lane.addSubview(empty);y=78
+            }
+            let empty=label("Drop a window here",size:11,color:.tertiaryLabelColor);empty.alignment = .center
+            empty.frame=NSRect(x:10,y:y+15,width:col-20,height:20);lane.addSubview(empty);y+=65
+            lane.frame.size.height=max(y,scroll.bounds.height);scroll.documentView=lane;columns.addSubview(scroll);laneScrolls[ws]=scroll
+            scroll.contentView.scroll(to:NSPoint(x:0,y:min(offsets[ws] ?? 0,max(0,y-scroll.bounds.height))))
         }
-        status.frame=NSRect(x:24,y:height-31,width:width-48,height:22);root.addSubview(status)
+        if spaces.isEmpty {
+            let empty=label(model.isEmpty ? "Loading your workspaces…" : "No workspaces available",size:16,color:.secondaryLabelColor)
+            empty.alignment = .center;empty.frame=NSRect(x:0,y:70,width:columns.bounds.width,height:26);columns.addSubview(empty)
+            let hint=label("Use Refresh to request the latest workspace list.",size:12,color:.tertiaryLabelColor)
+            hint.alignment = .center;hint.frame=NSRect(x:0,y:105,width:columns.bounds.width,height:24);columns.addSubview(hint)
+        }
+        deck.contentView.scroll(to:NSPoint(x:min(horizontal,max(0,deckWidth-deck.bounds.width)),y:0))
+        let hints=label("Drag to move  ·  Drop onto a window to pair  ·  Right-click for actions",size:11,color:.secondaryLabelColor)
+        hints.frame=NSRect(x:24,y:height-53,width:width-48,height:18);root.addSubview(hints)
+        let keys=label("Tab / arrows Select  ·  ↵ Open  ·  esc Close",size:10,color:.secondaryLabelColor)
+        keys.alignment = .right;keys.frame=NSRect(x:width-314,y:height-29,width:290,height:17);root.addSubview(keys)
+        status.frame=NSRect(x:24,y:height-30,width:max(80,width-360),height:20);root.addSubview(status)
+        for (index,tile) in windowTiles.enumerated() { tile.nextKeyView = index+1 < windowTiles.count ? windowTiles[index+1] : refresh }
+        refresh.nextKeyView = windowTiles.first
+        if let id=focusedID,let tile=windowTiles.first(where:{$0.ids.first == id}) { panel.makeFirstResponder(tile) }
+        panel.initialFirstResponder = windowTiles.first ?? refresh
+    }
+    func step(from tile: Tile, delta: Int) {
+        guard !windowTiles.isEmpty,let index=windowTiles.firstIndex(where:{$0 === tile}) else { return }
+        let next=windowTiles[(index+delta+windowTiles.count)%windowTiles.count]
+        panel.makeFirstResponder(next);next.scrollToVisible(next.bounds)
+        if let scroll=laneScrolls[next.workspace] { scroll.superview?.scrollToVisible(scroll.frame) }
     }
     func tile(_ row:[String:Any],frame:NSRect)->Tile {
-        Tile(frame:frame,ids:[row["id"] as! Int],workspace:row["workspace"] as! String,title:row["app"] as? String ?? "Window",subtitle:row["title"] as? String ?? "",icon:icon(row["bundle"] as? String ?? ""))
+        Tile(frame:frame,ids:[row["id"] as! Int],workspace:row["workspace"] as! String,title:row["app"] as? String ?? "Window",subtitle:row["title"] as? String ?? "",icon:icon(row))
     }
     func payload(_ sender:NSDraggingInfo)->[String:Any]? {
         guard !busy,sender.draggingSource is Tile,let data=sender.draggingPasteboard.data(forType:dragType),let p=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],p["session"] as? Int == session,p["version"] as? Int == version else { return nil };return p
@@ -272,6 +439,30 @@ final class Board: NSObject, NSWindowDelegate, NSMenuDelegate {
 let app=NSApplication.shared
 app.setActivationPolicy(.accessory)
 let board=Board()
+if CommandLine.arguments.contains("--surface-check") {
+    testPackets=[];board.start()
+    var checks:[[String:Any]]=[]
+    for (name,bundle) in [("Finder","com.apple.finder"),("Safari","com.apple.Safari"),("Terminal","com.apple.Terminal")] {
+        let running=NSRunningApplication.runningApplications(withBundleIdentifier:bundle).first
+        let row:[String:Any]=["app":name,"bundle":bundle,"pid":Int(running?.processIdentifier ?? 0)]
+        let resolved=board.applicationIcon(row)
+        checks.append(["app":name,"resolved":resolved != nil,"source":resolved?.source ?? "fallback"])
+    }
+    let finder=NSRunningApplication.runningApplications(withBundleIdentifier:"com.apple.finder").first
+    let missingBundle:[String:Any]=["app":"Finder","pid":Int(finder?.processIdentifier ?? 0)]
+    let pidFallback=board.applicationIcon(missingBundle)
+    // The same PID under a conflicting claimed identity must not display Finder.
+    let conflict:[String:Any]=["app":"Unknown","bundle":"local.hangar.invalid-fixture","pid":Int(finder?.processIdentifier ?? 0)]
+    let conflictingPIDRejected=board.applicationIcon(conflict) == nil
+    testPackets=nil
+    emit(["surface":String(describing:type(of:board.panel.contentView!)),
+          "opaque":board.panel.isOpaque,"backgroundAlpha":board.panel.backgroundColor.alphaComponent,
+          "visible":board.panel.isVisible,"preview":previewMode,
+          "reduceTransparency":NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
+          "icons":checks,"missingBundlePIDFallback":pidFallback?.source ?? "unavailable",
+          "conflictingPIDRejected":conflictingPIDRejected])
+    exit(board.panel.isOpaque || !conflictingPIDRejected || checks.contains{$0["resolved"] as? Bool != true} ? 1 : 0)
+}
 if CommandLine.arguments.contains("--self-test") {
     testPackets=[]
     board.model=["spaces":[["id":"1"],["id":"2"]],"windows":[
@@ -299,8 +490,43 @@ if CommandLine.arguments.contains("--self-test") {
     board.busy=false
     board.send("move",["ids":[3],"target":"1"],snapshot:["version":4,"session":7,"pair":false])
     check(testPackets!.last!["pair"] as? Bool == false)
-    print("\(checks) native overview menu/payload checks passed")
+    // Exercise the keyboard and overflow layout on a hidden native panel.
+    board.busy=false;board.start()
+    check(!board.panel.isVisible && board.windowTiles.count == 3)
+    let first=board.windowTiles[0],second=board.windowTiles[1]
+    board.panel.makeFirstResponder(first);board.step(from:first,delta:1)
+    check(board.panel.firstResponder === second)
+    let enter=NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:0,windowNumber:0,context:nil,characters:"\r",charactersIgnoringModifiers:"\r",isARepeat:false,keyCode:36)!
+    second.keyDown(with:enter)
+    check(testPackets!.last!["action"] as? String == "focus" && testPackets!.last!["ids"] as? [Int] == second.ids)
+    board.model=["spaces":(1...9).map{["id":String($0)]},"windows":[
+        ["id":1,"workspace":"1"],["id":2,"workspace":"9"]]]
+    board.root.frame.size=NSSize(width:680,height:450);board.render()
+    check(board.deckScroll!.documentView!.frame.width > board.deckScroll!.bounds.width)
+    check(board.windowTiles.allSatisfy{$0.frame.width >= 220})
+    board.step(from:board.windowTiles[0],delta:1)
+    check(board.panel.firstResponder === board.windowTiles[1] && board.deckScroll!.contentView.bounds.origin.x > 0)
+    print("\(checks) native overview menu/payload/keyboard/layout checks passed")
     exit(0)
+}
+if let index = CommandLine.arguments.firstIndex(of: "--render-preview"), index+1 < CommandLine.arguments.count {
+    if CommandLine.arguments.contains("--dark") { app.appearance = NSAppearance(named: .darkAqua) }
+    else if CommandLine.arguments.contains("--light") { app.appearance = NSAppearance(named: .aqua) }
+    board.start()
+    board.model = ["session": 1, "version": 1, "spaces": [
+        ["id": "1", "monitor": "Studio Display", "visible": true], ["id": "2", "monitor": "Mac display", "visible": true],
+        ["id": "3", "monitor": "Studio Display"], ["id": "4", "monitor": "Studio Display"]],
+        "windows": [
+            ["id": 1, "pid": 1, "workspace": "1", "app": "Safari", "bundle": "com.apple.Safari", "title": "A quieter place to work"],
+            ["id": 2, "pid": 1, "workspace": "1", "app": "Notes", "bundle": "com.apple.Notes", "title": "Launch notes"],
+            ["id": 3, "pid": 1, "workspace": "2", "app": "Finder", "bundle": "com.apple.finder", "title": "Design references"],
+            ["id": 4, "pid": 1, "workspace": "2", "app": "Terminal", "bundle": "com.apple.Terminal", "title": "hangar — main"],
+            ["id": 5, "pid": 1, "workspace": "3", "app": "Safari", "bundle": "com.apple.Safari", "title": "Weekend reading"]],
+        "pairs": [["ids": [1, 2], "workspace": "1"]]]
+    if CommandLine.arguments.contains("--empty") { board.model = ["spaces": [], "windows": []] }
+    board.status.stringValue = "Ready";board.render()
+    do { try writePreview(board.panel.contentView!, to: CommandLine.arguments[index+1]); exit(0) }
+    catch { fputs("Preview failed: \(error)\n", stderr); exit(1) }
 }
 DispatchQueue.main.async { board.start() }
 DispatchQueue.global(qos:.userInitiated).async {

@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import platform
 import re
 import shutil
 import signal
@@ -21,7 +22,7 @@ import tempfile
 import time
 import tomllib
 
-VERSION = '2026.10.04.3'
+VERSION = '2026.10.05.1'
 USER_DIR = Path.home()
 # Stable storage namespace shared with existing LeanMac installations.
 STATE = USER_DIR / 'Library/Application Support/LeanMac'
@@ -84,7 +85,9 @@ DEFAULT_HOTKEYS = {
     'snap_left': 'alt-left', 'snap_right': 'alt-right', 'snap_up': 'alt-up', 'snap_down': 'alt-down',
     'pair': 'alt-p', 'separate': 'alt-shift-p', 'layout_menu': 'alt-g', 'overview': 'alt-o',
     'palette': 'ctrl-alt-cmd-slash', 'gather': 'ctrl-alt-cmd-s', 'mx_picker': 'f17',
+    'shelf': 'ctrl-alt-cmd-a', 'settings': 'ctrl-alt-cmd-comma',
 }
+DEFAULT_MODULES = {'shelf': True}
 PORTABLE_APPS = {'terminal': 'Terminal', 'browser': 'Safari', 'finder': 'Finder'}
 LEGACY_APPS = {'terminal': 'Ghostty', 'browser': 'Brave Browser', 'finder': 'Finder'}
 MODIFIERS = ('ctrl', 'alt', 'cmd', 'shift')
@@ -119,40 +122,52 @@ def parse_hotkey(chord):
 def read_user_settings(path):
     if path.stat().st_size > 64 * 1024:
         raise ValueError(f'Settings exceed 64 KiB: {path}')
-    values = tomllib.loads(path.read_text())
-    unknown = values.keys() - {'schema', 'profile', 'apps', 'hotkeys'}
+    return parse_user_settings(path.read_text(), path.name)
+
+
+def parse_user_settings(text, name='settings'):
+    if len(text.encode()) > 64 * 1024:
+        raise ValueError(f'Settings exceed 64 KiB: {name}')
+    values = tomllib.loads(text)
+    unknown = values.keys() - {'schema', 'profile', 'shelf_style', 'apps', 'hotkeys', 'modules'}
     if unknown:
-        raise ValueError(f'{path.name}: unknown settings: {", ".join(sorted(unknown))}')
+        raise ValueError(f'{name}: unknown settings: {", ".join(sorted(unknown))}')
     if 'schema' in values and (type(values['schema']) is not int or values['schema'] != 1):
-        raise ValueError(f'{path.name}: schema must be integer 1')
+        raise ValueError(f'{name}: schema must be integer 1')
     if 'profile' in values and (not isinstance(values['profile'], str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]*', values['profile'])):
-        raise ValueError(f'{path.name}: invalid profile')
+        raise ValueError(f'{name}: invalid profile')
+    if 'shelf_style' in values and values['shelf_style'] not in ('compact', 'glass'):
+        raise ValueError(f'{name}: shelf_style must be compact or glass')
+    if 'modules' in values:
+        if not isinstance(values['modules'], dict) or values['modules'].keys() - DEFAULT_MODULES.keys() or any(type(v) is not bool for v in values['modules'].values()):
+            raise ValueError(f'{name}: modules must contain supported boolean switches')
     for section, allowed in [('apps', PORTABLE_APPS), ('hotkeys', DEFAULT_HOTKEYS)]:
         if section not in values:
             continue
         entries = values[section]
         if not isinstance(entries, dict) or entries.keys() - allowed.keys():
-            raise ValueError(f'{path.name}: unknown or invalid {section} settings')
+            raise ValueError(f'{name}: unknown or invalid {section} settings')
         for key, value in entries.items():
             if not isinstance(value, str) or not value.strip() or len(value) > 160 or any(ord(c) < 32 for c in value):
-                raise ValueError(f'{path.name}: {section}.{key} must be a nonempty string without control characters')
+                raise ValueError(f'{name}: {section}.{key} must be a nonempty string without control characters')
             if section == 'hotkeys':
                 parse_hotkey(value)
     return values
 
 
-def resolve_user_config(kit=None):
+def resolve_user_config(kit=None, file_overrides=None):
     directory = user_config_dir()
     sources = {'settings': None, 'local': None, 'aerospace': None, 'profile': 'legacy-selector' if (STATE / 'aerospace-profile').exists() else 'default'}
     merged = {}
     for name, source_key in [('settings.toml', 'settings'), ('settings.local.toml', 'local')]:
         path = directory / name
-        if not path.exists() and not path.is_symlink():
+        overridden = file_overrides is not None and name in file_overrides
+        if not overridden and not path.exists() and not path.is_symlink():
             continue
-        values = read_user_settings(path)
+        values = parse_user_settings(file_overrides[name], name) if overridden else read_user_settings(path)
         sources[source_key] = str(path)
         for key, value in values.items():
-            if key in ('apps', 'hotkeys'):
+            if key in ('apps', 'hotkeys', 'modules'):
                 merged.setdefault(key, {}).update(value)
             else:
                 merged[key] = value
@@ -174,7 +189,8 @@ def resolve_user_config(kit=None):
         sources['aerospace'] = str(override)
     elif kit is not None:
         sources['aerospace'] = str(Path(kit).resolve() / 'config' / ('aerospace.toml' if profile == 'default' else f'aerospace-{profile}.toml'))
-    return {'schema': 1, 'profile': profile, 'apps': apps, 'hotkeys': hotkeys,
+    return {'schema': 1, 'profile': profile, 'shelf_style': merged.get('shelf_style', 'compact'), 'apps': apps, 'hotkeys': hotkeys,
+            'modules': {**DEFAULT_MODULES, **merged.get('modules', {})},
             'sources': sources, 'legacy_defaults': not configured, 'runtime_hotkeys': runtime_keys}
 
 
@@ -204,6 +220,8 @@ def validate_user_config(config):
 
 
 def lua_literal(value):
+    if type(value) is bool:
+        return 'true' if value else 'false'
     if isinstance(value, str):
         # Lua accepts quoted UTF-8 and these escapes; inputs have no control bytes.
         return json.dumps(value, ensure_ascii=False)
@@ -215,7 +233,7 @@ def lua_literal(value):
 
 
 def render_runtime_settings(config):
-    return '-- Generated by Hangar; edit ~/.config/hangar/settings.toml and apply.\nreturn ' + lua_literal({'apps': config['apps'], 'hotkeys': config['runtime_hotkeys']}) + '\n'
+    return '-- Generated by Hangar; edit ~/.config/hangar/settings.toml and apply.\nreturn ' + lua_literal({'apps': config['apps'], 'hotkeys': config['runtime_hotkeys'], 'modules': config.get('modules', DEFAULT_MODULES), 'shelf_style': config.get('shelf_style', 'compact')}) + '\n'
 
 
 def init_user_config():
@@ -609,6 +627,10 @@ def install(kit, check_only=False, extras=False):
     with (contextlib.nullcontext() if check_only else install_lock()), tempfile.TemporaryDirectory(prefix='leanmac-stage-') as temp:
         stage = Path(temp)
         staged = {}
+        def app_icon(app):
+            resources = app / 'Contents/Resources'
+            resources.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(kit / 'config/Hangar.icns', resources / 'Hangar.icns')
         atomic_bytes(stage / 'hangar-settings.lua', render_runtime_settings(user_config).encode())
         staged[HS_DIR / 'hangar-settings.lua'] = stage / 'hangar-settings.lua'
         for name in LUA_FILES:
@@ -628,7 +650,8 @@ def install(kit, check_only=False, extras=False):
         expected = validate_config(stage / 'aerospace.toml')
         validate_lua([stage / name for name in LUA_FILES] + [stage / 'init.lua', stage / 'hangar-settings.lua'])
         helper = stage / 'leanmac-window-focus'
-        run(['/usr/bin/xcrun', 'swiftc', '-module-cache-path', stage / 'SwiftModuleCache',
+        swift_target = platform.machine() + '-apple-macos13.0'
+        run(['/usr/bin/xcrun', 'swiftc', '-target', swift_target, '-module-cache-path', stage / 'SwiftModuleCache',
              kit / 'config/leanmac-window-focus.swift', '-O', '-o', helper], timeout=120, required=True)
         run(['/usr/bin/codesign', '--force', '--sign', '-', helper], required=True)
         run(['/usr/bin/codesign', '--verify', '--strict', helper], required=True)
@@ -637,12 +660,13 @@ def install(kit, check_only=False, extras=False):
         overview = overview_app / 'Contents/MacOS/leanmac-overview'
         overview.parent.mkdir(parents=True)
         atomic_bytes(overview_app / 'Contents/Info.plist', plistlib.dumps({
-            'CFBundleIdentifier': 'local.leanmac.overview', 'CFBundleName': 'Hangar Spaces',
-            'CFBundleExecutable': 'leanmac-overview', 'CFBundlePackageType': 'APPL',
-            'CFBundleVersion': VERSION, 'LSUIElement': True, 'NSHighResolutionCapable': True}))
-        run(['/usr/bin/xcrun', 'swiftc', '-module-cache-path', stage / 'SwiftModuleCache',
+            'CFBundleIdentifier': 'local.leanmac.overview', 'CFBundleName': 'Tower',
+            'CFBundleExecutable': 'leanmac-overview', 'CFBundlePackageType': 'APPL', 'CFBundleIconFile': 'Hangar',
+            'CFBundleVersion': VERSION, 'LSMinimumSystemVersion': '13.0', 'LSUIElement': True, 'NSHighResolutionCapable': True}))
+        run(['/usr/bin/xcrun', 'swiftc', '-target', swift_target, '-module-cache-path', stage / 'SwiftModuleCache',
              kit / 'config/leanmac-overview.swift', '-O', '-o', overview], timeout=120, required=True)
         run([overview, '--self-test'], required=True)
+        app_icon(overview_app)
         run(['/usr/bin/codesign', '--force', '--sign', '-', overview_app], required=True)
         run(['/usr/bin/codesign', '--verify', '--strict', overview_app], required=True)
         for asset in overview_app.rglob('*'):
@@ -652,20 +676,47 @@ def install(kit, check_only=False, extras=False):
         picker = picker_app / 'Contents/MacOS/leanmac-picker'
         picker.parent.mkdir(parents=True)
         atomic_bytes(picker_app / 'Contents/Info.plist', plistlib.dumps({
-            'CFBundleIdentifier': 'local.leanmac.picker', 'CFBundleName': 'Hangar Windows',
-            'CFBundleExecutable': 'leanmac-picker', 'CFBundlePackageType': 'APPL',
-            'CFBundleVersion': VERSION, 'LSUIElement': True, 'NSHighResolutionCapable': True}))
-        run(['/usr/bin/xcrun', 'swiftc', '-module-cache-path', stage / 'SwiftModuleCache',
+            'CFBundleIdentifier': 'local.leanmac.picker', 'CFBundleName': 'Departures',
+            'CFBundleExecutable': 'leanmac-picker', 'CFBundlePackageType': 'APPL', 'CFBundleIconFile': 'Hangar',
+            'CFBundleVersion': VERSION, 'LSMinimumSystemVersion': '13.0', 'LSUIElement': True, 'NSHighResolutionCapable': True}))
+        run(['/usr/bin/xcrun', 'swiftc', '-target', swift_target, '-module-cache-path', stage / 'SwiftModuleCache',
              kit / 'config/leanmac-picker.swift', '-O', '-o', picker], timeout=120, required=True)
         run([picker, '--self-test'], required=True)
+        app_icon(picker_app)
         run(['/usr/bin/codesign', '--force', '--sign', '-', picker_app], required=True)
         run(['/usr/bin/codesign', '--verify', '--strict', picker_app], required=True)
         for asset in picker_app.rglob('*'):
             if asset.is_file():
                 staged[HS_DIR / 'bin/LeanMacPicker.app' / asset.relative_to(picker_app)] = asset
+        for bundle, executable, identifier, title in (
+                ('HangarShelf.app', 'hangar-shelf', 'local.hangar.apron', 'Apron'),
+                ('HangarSettings.app', 'hangar-settings', 'local.hangar.settings', 'Ground Control')):
+            app = stage / bundle
+            binary = app / 'Contents/MacOS' / executable
+            binary.parent.mkdir(parents=True)
+            atomic_bytes(app / 'Contents/Info.plist', plistlib.dumps({
+                'CFBundleIdentifier': identifier, 'CFBundleName': title,
+                'CFBundleExecutable': executable, 'CFBundlePackageType': 'APPL', 'CFBundleIconFile': 'Hangar',
+                'CFBundleVersion': VERSION, 'CFBundleShortVersionString': VERSION,
+                'LSMinimumSystemVersion': '13.0', 'LSUIElement': executable == 'hangar-shelf',
+                'NSHighResolutionCapable': True}))
+            run(['/usr/bin/xcrun', 'swiftc', '-target', swift_target, '-module-cache-path', stage / 'SwiftModuleCache',
+                 '-framework', 'AppKit', '-framework', 'Quartz', kit / 'config' / (executable + '.swift'), '-O', '-o', binary], timeout=120, required=True)
+            if executable == 'hangar-shelf':
+                run([binary, '--self-test'], timeout=30, required=True)
+            app_icon(app)
+            run(['/usr/bin/codesign', '--force', '--sign', '-', app], required=True)
+            run(['/usr/bin/codesign', '--verify', '--strict', app], required=True)
+            for asset in app.rglob('*'):
+                if asset.is_file():
+                    staged[HS_DIR / 'bin' / bundle / asset.relative_to(app)] = asset
         staged[USER_DIR / '.local/bin/hangar'] = kit / 'bin/hangar'
         staged[USER_DIR / '.local/bin/leanmac'] = kit / 'bin/leanmac'
         staged[USER_DIR / '.local/lib/leanmac/leanmac.py'] = kit / 'tools/leanmac.py'
+        for module in ('hangar_settings.py', 'hangar_catalog.py'):
+            compile((kit / 'tools' / module).read_text(), module, 'exec')
+            staged[USER_DIR / '.local/lib/leanmac' / module] = kit / 'tools' / module
+        staged[USER_DIR / '.local/lib/leanmac/utility-catalog.json'] = kit / 'config/utility-catalog.json'
         if extras:
             for app in ('Shottr', 'Thaw'):
                 plist = stage / f'local.leanmac.{app}.plist'
@@ -676,7 +727,7 @@ def install(kit, check_only=False, extras=False):
         run(['/bin/bash', '-n', kit / 'bin/hangar'], required=True)
         run(['/bin/bash', '-n', kit / 'bin/leanmac'], required=True)
         run(['/bin/bash', '-n', kit / 'install.command'], required=True)
-        print(f'Staging passed: {profile}, {len(LUA_FILES) + 2} Lua files, TOML profiles, compiled/signed focus helper.', flush=True)
+        print(f'Staging passed: {profile}, {len(LUA_FILES) + 2} Lua files, TOML profiles, five compiled/signed native helpers.', flush=True)
         if check_only:
             print('No live config replaced. AeroSpace semantic validation runs during guarded activation.')
             return
@@ -713,7 +764,7 @@ def install(kit, check_only=False, extras=False):
             manifest['status'] = 'applying'
             save_manifest(backup, manifest)
             for dest, source in staged.items():
-                atomic_bytes(dest, source.read_bytes(), 0o755 if dest.name in ('hangar', 'leanmac', 'leanmac-window-focus', 'leanmac-overview', 'leanmac-picker') else 0o600)
+                atomic_bytes(dest, source.read_bytes(), 0o755 if dest.name in ('hangar', 'leanmac', 'leanmac-window-focus', 'leanmac-overview', 'leanmac-picker', 'hangar-shelf', 'hangar-settings') else 0o600)
             if xdg in paths:
                 xdg.unlink()  # The exact duplicate is retained in the backup.
             # Atomic per file; AeroSpace semantic validation requires its live config path.
@@ -792,6 +843,12 @@ def rollback(name):
             USER_DIR / 'Library/LaunchAgents/local.leanmac.Shottr.plist',
             USER_DIR / 'Library/LaunchAgents/local.leanmac.Thaw.plist',
             USER_DIR / '.config/aerospace/aerospace.toml'}
+        allowed.update(USER_DIR / '.local/lib/leanmac' / name for name in ('hangar_settings.py', 'hangar_catalog.py', 'utility-catalog.json'))
+        for bundle, executable in (('HangarShelf.app', 'hangar-shelf'), ('HangarSettings.app', 'hangar-settings')):
+            allowed.update(HS_DIR / 'bin' / bundle / 'Contents' / name for name in
+                           ('Info.plist', 'MacOS/' + executable, '_CodeSignature/CodeResources'))
+        allowed.update(HS_DIR / 'bin' / bundle / 'Contents/Resources/Hangar.icns' for bundle in
+                       ('HangarShelf.app', 'HangarSettings.app', 'LeanMacOverview.app', 'LeanMacPicker.app'))
         # New backups retain the exact duplicate location across XDG changes.
         # Legacy backups did not record it: accept their saved absolute AeroSpace
         # target with the same narrow filename shape, including external XDG roots.
@@ -850,14 +907,28 @@ def main():
     r.add_argument('backup', nargs='?', default='last')
     sub.add_parser('backups', help='List transactional backup names and states')
     sub.add_parser('palette', help='Open the command palette')
+    settings = sub.add_parser('settings', help='Open Ground Control — visual settings and Quick Install')
+    settings.add_argument('--tab', choices=('general', 'shortcuts', 'utilities', 'maintenance'), default='general')
+    shelf = sub.add_parser('shelf', help='Open Apron or add files to its shelf')
+    shelf.add_argument('paths', nargs='*', type=Path)
+    utilities = sub.add_parser('utilities', help='List and install optional curated applications')
+    utility_actions = utilities.add_subparsers(dest='utility_command', required=True)
+    listing = utility_actions.add_parser('list')
+    listing.add_argument('--json', action='store_true')
+    add_utility = utility_actions.add_parser('install')
+    add_utility.add_argument('id')
+    add_utility.add_argument('--json', action='store_true')
+    add_utility.add_argument('--allow-unnotarized', action='store_true', help='Explicitly trust Tinycast’s tap and its quarantine-clearing cask')
     c = sub.add_parser('config', help='Manage desired portable configuration; activation is explicit')
     actions = c.add_subparsers(dest='config_command', required=True)
     actions.add_parser('init', help='Create portable defaults without overwriting existing settings')
-    for action in ('show', 'check', 'apply'):
+    for action in ('show', 'check', 'apply', 'schema', 'save'):
         command = actions.add_parser(action)
         command.add_argument('--kit', type=Path, default=default_kit())
-        if action == 'show':
+        if action in ('show', 'schema', 'save'):
             command.add_argument('--json', action='store_true')
+        if action == 'save':
+            command.add_argument('--input', type=Path, required=True, help='JSON with revision, changes and local/shared scope')
     args = parser.parse_args()
     try:
         if args.command == 'config':
@@ -865,6 +936,15 @@ def main():
                 init_user_config()
             elif args.config_command == 'apply':
                 install(args.kit)
+            elif args.config_command in ('schema', 'save'):
+                import hangar_settings
+                if args.config_command == 'schema':
+                    result = hangar_settings.snapshot(sys.modules[__name__], args.kit)
+                else:
+                    if args.input.stat().st_size > 64 * 1024:
+                        raise ValueError('Settings request exceeds 64 KiB')
+                    result = hangar_settings.save(sys.modules[__name__], json.loads(args.input.read_text()), args.kit)
+                print(json.dumps(result, ensure_ascii=False, indent=None if args.json else 2))
             else:
                 config = resolve_user_config(args.kit)
                 if args.config_command == 'check':
@@ -872,6 +952,43 @@ def main():
                 else:
                     config.pop('runtime_hotkeys')
                     print(json.dumps(config, ensure_ascii=False, indent=None if args.json else 2))
+            return 0
+        if args.command == 'utilities':
+            import hangar_catalog
+            if args.utility_command == 'list':
+                result = hangar_catalog.catalog_status()
+                if args.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    for entry in result:
+                        print(f'{entry["name"]}: {"installed" if entry["installed"] else entry.get("reason") or "available"}')
+                return 0
+            result = hangar_catalog.install_utility(args.id, emit=lambda line: print(line, file=sys.stderr, flush=True), allow_unnotarized=args.allow_unnotarized)
+            print(json.dumps(result, ensure_ascii=False) if args.json else result['message'])
+            return 0 if result.get('ok') else 2
+        if args.command == 'settings':
+            app = HS_DIR / 'bin/HangarSettings.app'
+            if not app.is_dir():
+                raise RuntimeError('Ground Control is not installed. Run the Hangar installer first.')
+            run(['/usr/bin/open', str(app), '--args', '--tab', args.tab], required=True)
+            return 0
+        if args.command == 'shelf':
+            config = resolve_user_config(default_kit())
+            if not config['modules']['shelf']:
+                raise RuntimeError('Apron is disabled. Enable the file shelf in Hangar settings.')
+            app = HS_DIR / 'bin/HangarShelf.app'
+            helper = app / 'Contents/MacOS/hangar-shelf'
+            if not helper.is_file():
+                raise RuntimeError('Apron is not installed. Run the Hangar installer first.')
+            paths = [str(path.expanduser().resolve(strict=True)) for path in args.paths]
+            command = [helper, '--wait', '--style', config['shelf_style']]
+            if paths:
+                command += ['--add', *paths]
+            code, out, err = run(command, timeout=20)
+            if code:
+                raise RuntimeError(err or out or 'Apron could not open the shelf')
+            if paths:
+                print(out)
             return 0
         if args.command == 'doctor':
             report = doctor()

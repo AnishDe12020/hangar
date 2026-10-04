@@ -1,0 +1,172 @@
+{
+  "schema": 1,
+  "reviewed_on": "2026-10-04",
+  "utilities": [
+    {
+      "id": "tinycast",
+      "name": "Tinycast",
+      "summary": "Native launcher, clipboard history, snippets and Raycast-compatible extensions.",
+      "category": "Launcher",
+      "homepage": "https://tinycast.dev/",
+      "install_url": "https://tinycast.dev/docs/install/",
+      "license": "AGPL-3.0",
+      "pricing": "Free and open source",
+      "minimum_macos": "26.0",
+      "minimum_install_macos": "26.0",
+      "architectures": [
+        "arm64",
+        "x86_64"
+      ],
+      "app_name": "Tinycast.app",
+      "bundle_ids": [
+        "com.tinycast.app"
+      ],
+      "notes": "Extensions are opt-in and compatibility varies by extension. Configure its shortcut yourself to avoid overlap with Hangar.",
+      "sources": [
+        "https://github.com/abue-ammar/tinycast",
+        "https://tinycast.dev/docs/install/",
+        "https://tinycast.dev/docs/extensions/compatibility/",
+        "https://github.com/abue-ammar/homebrew-tinycast/blob/main/Casks/tinycast.rb",
+        "https://github.com/abue-ammar/homebrew-tinycast/blob/main/Casks/tinycast-universal.rb"
+      ]
+    },
+    {
+      "id": "shottr",
+      "name": "Shottr",
+      "summary": "Screenshot annotation, scrolling capture, OCR and pixel measurements.",
+      "category": "Screenshots",
+      "homepage": "https://shottr.cc/",
+      "install_url": "https://shottr.cc/",
+      "license": "Proprietary",
+      "pricing": "Free use with reminders; paid license required for commercial use",
+      "minimum_macos": "10.15",
+      "minimum_install_macos": "12.0",
+      "architectures": [
+        "arm64",
+        "x86_64"
+      ],
+      "app_name": "Shottr.app",
+      "bundle_ids": [
+        "cc.ffitch.shottr"
+      ],
+      "notes": "The current Homebrew cask requires macOS 12+. Screen Recording permission and any paid license are configured in Shottr. Its preferences control telemetry.",
+      "sources": [
+        "https://shottr.cc/",
+        "https://shottr.cc/purchase.html",
+        "https://formulae.brew.sh/cask/shottr",
+        "https://github.com/Homebrew/homebrew-cask/blob/master/Casks/s/shottr.rb"
+      ]
+    },
+    {
+      "id": "thaw",
+      "name": "Thaw",
+      "summary": "Hide, reveal and arrange menu bar items, with a separate Thaw Bar.",
+      "category": "Menu bar",
+      "homepage": "https://github.com/thaw-app/Thaw",
+      "install_url": "https://github.com/thaw-app/Thaw/releases/latest",
+      "license": "GPL-3.0",
+      "pricing": "Free and open source",
+      "minimum_macos": "26.0",
+      "minimum_install_macos": "26.0",
+      "architectures": [
+        "arm64",
+        "x86_64"
+      ],
+      "app_name": "Thaw.app",
+      "bundle_ids": [
+        "com.stonerl.Thaw"
+      ],
+      "notes": "Signed and notarized. Accessibility is needed for arranging items; Screen Recording is optional. Keep existing layouts and preferences.",
+      "sources": [
+        "https://github.com/thaw-app/Thaw",
+        "https://formulae.brew.sh/cask/thaw",
+        "https://github.com/Homebrew/homebrew-cask/blob/master/Casks/t/thaw.rb"
+      ]
+    },
+    {
+      "id": "localsend",
+      "name": "LocalSend",
+      "summary": "Transfer files and text between nearby Macs, phones and other computers over the local network.",
+      "category": "File transfer",
+      "homepage": "https://localsend.org/",
+      "install_url": "https://localsend.org/download",
+      "license": "Apache-2.0",
+      "pricing": "Free and open source",
+      "minimum_macos": "11.0",
+      "minimum_install_macos": "11.0",
+      "architectures": [
+        "arm64",
+        "x86_64"
+      ],
+      "app_name": "LocalSend.app",
+      "bundle_ids": [
+        "org.localsend.localsendApp"
+      ],
+      "notes": "Choose when you share with Android, Windows or Linux devices. Both devices need LocalSend and local network access. Hangar does not change firewall rules, allow incoming transfers or enable login launch.",
+      "sources": [
+        "https://github.com/localsend/localsend",
+        "https://formulae.brew.sh/cask/localsend",
+        "https://github.com/Homebrew/homebrew-cask/blob/master/Casks/l/localsend.rb"
+      ]
+    },
+    {
+      "id": "iina",
+      "name": "IINA",
+      "summary": "Media playback for local video and audio files, with broad format support through mpv.",
+      "category": "Media player",
+      "homepage": "https://iina.io/",
+      "install_url": "https://iina.io/download/",
+      "license": "GPL-3.0",
+      "pricing": "Free and open source",
+      "minimum_macos": "11.0",
+      "minimum_install_macos": "12.0",
+      "minimum_install_macos_by_arch": {
+        "arm64": "12.0",
+        "x86_64": "11.0"
+      },
+      "architectures": [
+        "arm64",
+        "x86_64"
+      ],
+      "app_name": "IINA.app",
+      "bundle_ids": [
+        "com.colliderli.iina"
+      ],
+      "notes": "Choose when QuickTime does not cover your formats or playback controls. Apple silicon requires macOS 12; Intel supports 11. The Homebrew cask also links the iina command. Hangar does not change default file associations or install plugins.",
+      "sources": [
+        "https://github.com/iina/iina",
+        "https://iina.io/download/",
+        "https://formulae.brew.sh/cask/iina",
+        "https://formulae.brew.sh/api/cask/iina.json",
+        "https://github.com/Homebrew/homebrew-cask/blob/master/Casks/i/iina.rb"
+      ]
+    },
+    {
+      "id": "stats",
+      "name": "Stats",
+      "summary": "Optional menu bar monitoring for CPU, memory, disks and network; polls while running.",
+      "category": "System monitoring",
+      "homepage": "https://github.com/exelban/stats",
+      "install_url": "https://github.com/exelban/stats/releases/latest",
+      "license": "MIT",
+      "pricing": "Free and open source",
+      "minimum_macos": "12.0",
+      "minimum_install_macos": "12.0",
+      "architectures": [
+        "arm64",
+        "x86_64"
+      ],
+      "app_name": "Stats.app",
+      "bundle_ids": [
+        "eu.exelban.Stats"
+      ],
+      "notes": "Choose only if you want continuous monitoring. Periodic reads cost CPU and energy; disable unneeded modules, especially Sensors and Bluetooth. Fan control is unmaintained upstream. Hangar does not configure a privileged helper, fan control, remote monitoring or login items.",
+      "sources": [
+        "https://github.com/exelban/stats",
+        "https://github.com/exelban/stats/blob/master/LICENSE",
+        "https://formulae.brew.sh/cask/stats",
+        "https://github.com/Homebrew/homebrew-cask/blob/master/Casks/s/stats.rb"
+      ]
+    }
+  ]
+}

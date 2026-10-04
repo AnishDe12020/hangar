@@ -74,7 +74,7 @@ try:
     send('show', windows=windows, frame=frame, hold=False, step=0, originWorkspace='1')
     shown = receive('shown')
     assert (shown['rows'], shown['windows'], shown['id']) == (6,7,1), shown
-    assert shown['ids'] == [1,3] and shown['width'] == 620 and shown['height'] <= 520
+    assert shown['ids'] == [1,3] and shown['width'] == 680 and shown['height'] <= 600
     timings = [shown['elapsedMs']]
     seq = send('focus', session=1, id=0, pid=0, restores=[])
     rejected = receive('focused')

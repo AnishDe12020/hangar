@@ -15,7 +15,9 @@ Option = ⌥, Shift = ⇧, Control = ⌃, Command = ⌘. These are default keys.
 | ⌥⇧comma / period | Move window to previous / next display and follow |
 | ⌥P / ⌥⇧P | Form a pair / separate the current window |
 | ⌥G | Layout menu |
-| ⌥O | Workspace overview |
+| ⌥O | Tower workspace overview |
+| ⌃⌥⌘A | Apron file shelf |
+| ⌃⌥⌘comma | Ground Control settings |
 | ⌥F | Toggle AeroSpace fullscreen (does not create a native fullscreen Space) |
 | ⌥← / → / ↑ / ↓ | Snap left / right / full display / restore size |
 | Drag title bar to an edge | Snap to that edge |

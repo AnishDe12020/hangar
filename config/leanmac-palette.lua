@@ -75,6 +75,10 @@ function C.refresh()
     if code ~= 0 or not ok or type(bindings) ~= 'table' then return end
     local choices, actions = {}, {}
     add(choices, actions, 'doctor', 'Diagnose Hangar', 'Secure Input · services · displays · shortcuts', C.diagnose)
+    add(choices, actions, 'settings', 'Ground Control · Settings', U.label('settings') .. ' · launchers, shortcuts, Quick Install and recovery', function() leanmac.openUtility('settings') end)
+    if not U.modules or U.modules.shelf ~= false then
+      add(choices, actions, 'shelf', 'Apron · File shelf', U.label('shelf') .. ' · gather files, text and links', function() leanmac.openUtility('shelf') end)
+    end
     add(choices, actions, 'windows', 'Search windows', U.label('picker_search') .. ' · exact window picker', function() leanmac.picker.start(false, false) end)
     add(choices, actions, 'layouts', 'Window layouts', U.label('layout_menu') .. ' · split pairs, zoom, resize and reset', function() leanmac.groups.show() end)
     add(choices, actions, 'overview', 'Workspace overview', U.label('overview') .. ' · drag windows and linked pairs between spaces', function() leanmac.overview.show() end)

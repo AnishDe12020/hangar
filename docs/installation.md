@@ -8,11 +8,11 @@ bash install.command --check     # dependencies must already be installed
 bash install.command            # install missing dependencies and activate
 ```
 
-Homebrew is installed separately from its official website. Apple's Command Line Tools provide Swift; Python must be 3.11 or newer. AeroSpace comes from `nikitabobko/tap/aerospace`. Hangar also uses Hammerspoon, Shottr, and Thaw.
+Homebrew is installed separately from its official website. Apple's Command Line Tools provide Swift; Python must be 3.11 or newer. AeroSpace comes from `nikitabobko/tap/aerospace`; Hammerspoon is the other core dependency. Optional apps such as Tinycast, Shottr and Thaw are selected in Ground Control's Quick Install.
 
 `--check` compiles and ad-hoc signs three native helpers, runs their available self-tests, and validates Lua and TOML without writing installation state, replacing configuration, or installing dependencies. AeroSpace's semantic validation needs its active configuration path and runs during guarded activation. A successful staging check is not proof that OS permissions or live shortcuts work.
 
-`--configs-only` activates configs and helpers using the installed dependencies. It skips Shottr/Thaw preference changes and their login agents. Use it for updates when you want to keep those app preferences.
+`--configs-only` activates configs and helpers using installed dependencies. Both normal installation and configuration-only updates preserve optional app preferences.
 
 ## Files and settings
 
@@ -22,11 +22,17 @@ The primary CLI is copied into `~/.local/bin/hangar`; `~/.local/bin/leanmac` rem
 
 Backups and the local profile selector live under `~/Library/Application Support/LeanMac`. The installer backs up a second XDG AeroSpace config and removes that duplicate during activation so there is one active config. Symlinks are recorded for rollback.
 
-A full install additionally seeds Shottr/Thaw preferences, changes the macOS area-screenshot shortcut to avoid Shottr's shortcut, and adds per-user Shottr/Thaw login agents. AeroSpace and Hammerspoon are configured to start at login. Existing app licenses, accounts, browser data, mouse settings, and unrelated applications are not migrated by the kit.
+AeroSpace and Hammerspoon are configured to start at login. The old optional `hangar install --extras` CLI switch remains available for deliberate Shottr/Thaw preference and login-agent seeding; normal installation no longer uses it. Existing app licenses, accounts, browser data, mouse settings, and unrelated applications are not migrated by the kit.
 
 ## First-run permissions
 
-Grant Accessibility to AeroSpace and Hammerspoon before expecting switching, snapping, or pairing to work. Thaw needs Accessibility and screen recording; Shottr needs screen recording. Follow macOS prompts and restart apps if requested. These permissions are per-Mac and cannot be imported from a backup or profile.
+Grant Accessibility to AeroSpace and Hammerspoon before expecting switching, snapping, or pairing to work. Optional apps explain their own permissions: Shottr requires screen recording for capture; Thaw uses Accessibility and may request screen recording for its additional display features. Follow macOS prompts and restart apps if requested. These permissions are per-Mac and cannot be imported from a backup or profile.
+
+## Ground Control and Apron
+
+`hangar settings` opens visual settings. Desired edits are validated against shortcut ownership before saving; they do not activate until you apply. A separate settings backup is saved under `~/Library/Application Support/LeanMac/settings-backups`. **This Mac only** writes `settings.local.toml`; **Shared dotfiles** writes `settings.toml`, following an existing symlink. If a local override shadows a shared edit, Ground Control reports it rather than pretending the effective setting changed.
+
+Apron stores its shelf index and imported text/images under `~/Library/Application Support/LeanMac/Apron`. References to original files are separate from owned imports. Shelf contents, clipboard data and third-party app accounts are not synced by Hangar. New native helpers live under `~/.hammerspoon/bin/HangarShelf.app` and `HangarSettings.app`; the installer includes them in transactional backup and rollback.
 
 If activation fails on a fresh Mac, it restores the configuration snapshot. Grant permissions to the installed apps, then run the installer again. Read the reported backup path if recovery itself fails.
 

@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""Optional utility catalog. Listing is local and read-only; installation is explicit."""
+import argparse
+import codecs
+import fcntl
+import json
+import os
+from pathlib import Path
+import platform
+import plistlib
+import re
+import selectors
+import signal
+import subprocess
+import sys
+import time
+from xml.parsers.expat import ExpatError
+
+# Commands are code-owned. Catalog descriptions can never introduce a command or tap.
+_CASKS = {
+    'tinycast': {'arm64': 'abue-ammar/tinycast/tinycast',
+                 'x86_64': 'abue-ammar/tinycast/tinycast-universal'},
+    'shottr': {'arm64': 'homebrew/cask/shottr', 'x86_64': 'homebrew/cask/shottr'},
+    'thaw': {'arm64': 'homebrew/cask/thaw', 'x86_64': 'homebrew/cask/thaw'},
+    'localsend': {'arm64': 'homebrew/cask/localsend', 'x86_64': 'homebrew/cask/localsend'},
+    'iina': {'arm64': 'homebrew/cask/iina', 'x86_64': 'homebrew/cask/iina'},
+    'stats': {'arm64': 'homebrew/cask/stats', 'x86_64': 'homebrew/cask/stats'},
+}
+_TINYCAST_CONSENT = (
+    'Tinycast is self-signed and is not notarized by Apple. Installing it will persistently '
+    'trust the abue-ammar/tinycast Homebrew tap. Its cask removes the macOS quarantine flag '
+    'from Tinycast.app during installation and future cask upgrades, bypassing the normal '
+    'Gatekeeper check for this app. Approve only if you trust this publisher. '
+    'Tap trust remains even if installation fails. Hangar will not launch the app or grant permissions.'
+)
+_OUTPUT_LIMIT = 65536
+
+
+def _catalog_path():
+    adjacent = Path(__file__).resolve().with_name('utility-catalog.json')
+    return adjacent if adjacent.is_file() else Path(__file__).resolve().parents[1] / 'config/utility-catalog.json'
+
+
+def _entries():
+    document = json.loads(_catalog_path().read_text())
+    entries = document['utilities']
+    if document.get('schema') != 1 or not isinstance(entries, list):
+        raise ValueError('Unsupported utility catalog schema')
+    if len(entries) != len(_CASKS) or {x['id'] for x in entries} != set(_CASKS):
+        raise ValueError('Utility catalog does not match the installer allowlist')
+    return entries
+
+
+def _version(value):
+    if not isinstance(value, str) or not re.fullmatch(r'\d+(?:\.\d+){0,2}', value):
+        return None
+    return tuple(int(x) for x in value.split('.')) + (0,) * (3 - len(value.split('.')))
+
+
+def _find_brew():
+    for path in ('/opt/homebrew/bin/brew', '/usr/local/bin/brew'):
+        if Path(path).is_file() and os.access(path, os.X_OK):
+            return path
+    return ''
+
+
+def _plain(text):
+    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
+    return ''.join(c for c in text if c in '\n\t' or ord(c) >= 32)
+
+
+def _stop_process(process):
+    # Every runner has its own session; stop descendants as well as the brew parent.
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
+def _run_process(command, emit=None, *, timeout=900):
+    """Stream bounded diagnostic output; never invoke a shell or prompt for a password."""
+    environment = {k: v for k, v in os.environ.items() if not k.startswith('HOMEBREW_')}
+    environment.update(HOMEBREW_NO_AUTO_UPDATE='1', HOMEBREW_NO_INSTALL_CLEANUP='1',
+                       HOMEBREW_NO_ANALYTICS='1', HOMEBREW_NO_ENV_HINTS='1',
+                       HOMEBREW_NO_INSTALL_UPGRADE='1', NONINTERACTIVE='1')
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, env=environment, start_new_session=True)
+    output = ''
+    pending = ''
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(command, timeout, output=output)
+                for key, _ in selector.select(min(0.25, max(0, deadline - time.monotonic()))):
+                    data = os.read(key.fileobj.fileno(), 8192)
+                    chunk = decoder.decode(data, final=not data)
+                    output = (output + chunk)[-_OUTPUT_LIMIT:]
+                    pending += chunk
+                    while '\n' in pending or len(pending) > 4096:
+                        if '\n' in pending[:4097]:
+                            line, pending = pending.split('\n', 1)
+                        else:
+                            line, pending = pending[:4096], pending[4096:]
+                        if emit:
+                            emit(_plain(line))
+                    if not data:
+                        selector.unregister(key.fileobj)
+            if pending and emit:
+                emit(_plain(pending))
+        returncode = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(command, returncode, _plain(output))
+    except BaseException:
+        _stop_process(process)
+        raise
+    finally:
+        process.stdout.close()
+
+
+class Catalog:
+    """Local discovery and installer boundary; paths/runner may be supplied by a caller."""
+    def __init__(self, *, app_dirs=None, system=None, macos=None, architecture=None,
+                 brew=None, lock_path=None, runner=None):
+        self.app_dirs = [Path(x) for x in app_dirs] if app_dirs is not None else [Path('/Applications'), Path.home() / 'Applications']
+        self.system = platform.system() if system is None else system
+        self.macos = platform.mac_ver()[0] if macos is None else macos
+        self.architecture = platform.machine() if architecture is None else architecture
+        self.brew = _find_brew() if brew is None else str(brew)
+        self.lock_path = Path(lock_path) if lock_path is not None else Path.home() / 'Library/Caches/Hangar/utility-install.lock'
+        self.runner = runner or _run_process
+
+    def _installed(self, entry):
+        for root in self.app_dirs:
+            preferred = root / entry['app_name']
+            try:
+                paths = [preferred] + sorted(x for x in root.glob('*.app') if x != preferred)
+            except OSError:
+                paths = [preferred]
+            for path in paths:
+                try:
+                    info_path = path / 'Contents/Info.plist'
+                    if info_path.stat().st_size > 1024 * 1024:
+                        continue
+                    with info_path.open('rb') as stream:
+                        info = plistlib.load(stream)
+                    if isinstance(info, dict) and info.get('CFBundleIdentifier') in entry['bundle_ids']:
+                        return str(path)
+                except (OSError, ValueError, plistlib.InvalidFileException, ExpatError):
+                    continue
+        return None
+
+    def _status(self, entry):
+        item = dict(entry)
+        installed = self._installed(entry)
+        minimum_install = entry.get('minimum_install_macos_by_arch', {}).get(self.architecture, entry['minimum_install_macos'])
+        reason = ''
+        compatible = True
+        if self.system != 'Darwin':
+            reason = 'These utilities require macOS.'
+            compatible = False
+        elif self.architecture not in entry['architectures']:
+            reason = f'Unsupported architecture: {self.architecture}.'
+            compatible = False
+        elif _version(self.macos) is None:
+            reason = 'Could not determine the macOS version.'
+            compatible = False
+        elif _version(self.macos) < _version(minimum_install):
+            reason = f"Quick Install requires macOS {minimum_install} or newer. See the official download for other versions."
+            compatible = False
+        occupied = next((str(root / entry['app_name']) for root in self.app_dirs
+                         if os.path.lexists(root / entry['app_name'])), None) if not installed else None
+        if compatible and occupied:
+            reason = f'{occupied} already exists but could not be identified. Preserve it and resolve the conflict manually.'
+        elif compatible and not self.brew:
+            reason = 'Homebrew is required for Quick Install. Install it yourself or use the official download.'
+        item.update(minimum_install_macos=minimum_install, installed=bool(installed), installed_path=installed, compatible=compatible,
+                    available=compatible and bool(self.brew) and not occupied and not installed,
+                    reason=reason, install_method='homebrew', homebrew_path=self.brew or None,
+                    consent_required=entry['id'] == 'tinycast',
+                    consent_message=_TINYCAST_CONSENT if entry['id'] == 'tinycast' else '',
+                    manual_action=entry['install_url'], occupied_path=occupied)
+        return item
+
+    def status(self):
+        return [self._status(entry) for entry in _entries()]
+
+    def install(self, utility_id, emit=None, *, allow_unnotarized=False):
+        if not isinstance(utility_id, str) or utility_id not in _CASKS:
+            return {'id': utility_id, 'ok': False, 'status': 'unknown_utility', 'message': 'Unknown utility. Choose an ID from the catalog.'}
+        entry = next(x for x in _entries() if x['id'] == utility_id)
+
+        def result(status, message, **extra):
+            if utility_id == 'tinycast' and status in ('failed', 'timed_out', 'verification_failed'):
+                message += ' Any tap trust already applied remains in Homebrew; it has not been undone.'
+            return {'id': utility_id, 'ok': status in ('installed', 'already_installed'),
+                    'status': status, 'message': message, 'install_url': entry['install_url'], **extra}
+
+        def preflight():
+            state = self._status(entry)
+            if state['installed']:
+                return result('already_installed', f"{entry['name']} is already installed; no changes made.", installed_path=state['installed_path'])
+            if not state['compatible']:
+                return result('unsupported', state['reason'])
+            if state['occupied_path']:
+                return result('blocked', state['reason'])
+            if not self.brew:
+                return result('homebrew_required', state['reason'])
+            if utility_id == 'tinycast' and allow_unnotarized is not True:
+                return result('consent_required', _TINYCAST_CONSENT, consent_required=True)
+            return None
+
+        refusal = preflight()
+        if refusal:
+            return refusal
+        lock = None
+        commands = []
+        trust_applied = False
+        output = ''
+        try:
+            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock = os.open(self.lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return result('busy', 'Another Hangar utility installation is running. Retry after it finishes.')
+            refusal = preflight()  # Discovery is repeated after acquiring the installer lock.
+            if refusal:
+                return refusal
+            if utility_id == 'tinycast':
+                commands.append([self.brew, 'trust', '--tap', 'abue-ammar/tinycast'])
+            commands.append([self.brew, 'install', '--cask', '--quarantine', _CASKS[utility_id][self.architecture]])
+            for command in commands:
+                phase = 'Trusting the approved Tinycast tap' if command[1] == 'trust' else f"Installing {entry['name']} with Homebrew"
+                if emit:
+                    emit(phase + '…')
+                completed = self.runner(command, emit)
+                output = (output + (completed.stdout or '') + (getattr(completed, 'stderr', None) or ''))[-_OUTPUT_LIMIT:]
+                if completed.returncode:
+                    message = (f'{phase} failed (exit {completed.returncode}). Review the output; resolve Homebrew, network or permission errors and retry. '
+                               'For an unsupported trust command, update Homebrew yourself or use the official download.')
+                    return result('failed', message, command=command, output=output, trust_applied=trust_applied)
+                if command[1] == 'trust':
+                    trust_applied = True
+            installed = self._installed(entry)
+            if not installed:
+                return result('verification_failed', 'Homebrew finished, but the app was not found in /Applications or ~/Applications. Check its output and any custom Homebrew app directory before retrying.', output=output, trust_applied=trust_applied)
+            if emit:
+                emit(f"{entry['name']} installed. Open it yourself to configure shortcuts and permissions.")
+            return result('installed', f"{entry['name']} installed. It has not been launched.",
+                          installed_path=installed, output=output, trust_applied=trust_applied)
+        except subprocess.TimeoutExpired as error:
+            detail = error.output or ''
+            if isinstance(detail, bytes):
+                detail = detail.decode('utf-8', errors='replace')
+            return result('timed_out', 'Homebrew timed out and its installer process was stopped. Check the app and Homebrew state before retrying.', output=(output + detail)[-_OUTPUT_LIMIT:], trust_applied=trust_applied)
+        except OSError as error:
+            return result('failed', f'Could not run the installer: {error}. Check Homebrew and filesystem permissions.', output=output, trust_applied=trust_applied)
+        finally:
+            if lock is not None:
+                os.close(lock)
+
+
+def catalog_status():
+    """Return serializable metadata plus local installation/availability state."""
+    return Catalog().status()
+
+
+def install_utility(utility_id, emit=None, *, allow_unnotarized=False):
+    """Install a known utility; Tinycast requires explicit trust/quarantine consent."""
+    return Catalog().install(utility_id, emit, allow_unnotarized=allow_unnotarized)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    subcommands = parser.add_subparsers(dest='command', required=True)
+    listing = subcommands.add_parser('list', help='Read local utility availability')
+    listing.add_argument('--json', action='store_true')
+    installing = subcommands.add_parser('install', help='Install one optional utility')
+    installing.add_argument('id')
+    installing.add_argument('--json', action='store_true')
+    installing.add_argument('--allow-unnotarized', action='store_true', help='Explicitly approve Tinycast tap trust and its quarantine-removing cask')
+    args = parser.parse_args(argv)
+    try:
+        if args.command == 'list':
+            entries = catalog_status()
+            if args.json:
+                print(json.dumps(entries, indent=2))
+            else:
+                for entry in entries:
+                    state = 'installed' if entry['installed'] else ('available with approval' if entry['available'] and entry['consent_required'] else 'available' if entry['available'] else entry['reason'])
+                    print(f"{entry['id']:10} {entry['name']}: {state}")
+            return 0
+        result = install_utility(args.id, lambda line: print(line, file=sys.stderr, flush=True), allow_unnotarized=args.allow_unnotarized)
+        print(json.dumps(result, indent=2) if args.json else result['message'])
+        return 0 if result['ok'] else 1
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        result = {'ok': False, 'status': 'catalog_error', 'message': f'Could not read the utility catalog: {error}'}
+        print(json.dumps(result) if args.json else result['message'])
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
