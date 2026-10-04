@@ -23,7 +23,7 @@ import tempfile
 import time
 import tomllib
 
-VERSION = '2026.10.05.2'
+VERSION = '2026.10.05.3'
 USER_DIR = Path.home()
 # Stable storage namespace shared with existing LeanMac installations.
 STATE = USER_DIR / 'Library/Application Support/LeanMac'
@@ -757,6 +757,9 @@ def install(kit, check_only=False, extras=False):
                  '-framework', 'AppKit', '-framework', 'Quartz', kit / 'config' / (executable + '.swift'), '-O', '-o', binary], timeout=120, required=True)
             if executable == 'hangar-shelf':
                 run([binary, '--self-test'], timeout=30, required=True)
+            else:
+                run([binary, '--self-test-appearance'], timeout=30, required=True)
+                run([binary, '--self-test-navigation'], timeout=30, required=True)
             app_icon(app)
             run(['/usr/bin/codesign', '--force', '--sign', '-', app], required=True)
             run(['/usr/bin/codesign', '--verify', '--strict', app], required=True)
@@ -989,7 +992,7 @@ def main():
     sub.add_parser('backups', help='List transactional backup names and states')
     sub.add_parser('palette', help='Open the command palette')
     settings = sub.add_parser('settings', help='Open Ground Control — visual settings and Quick Install')
-    settings.add_argument('--tab', choices=('general', 'sessions', 'shortcuts', 'utilities', 'maintenance'), default='general')
+    settings.add_argument('--tab', choices=('general', 'sessions', 'shortcuts', 'utilities', 'maintenance'))
     shelf = sub.add_parser('shelf', help='Open Apron or add files to its shelf')
     shelf.add_argument('paths', nargs='*', type=Path)
     hold = sub.add_parser('hold', help='Holding Pattern — temporarily keep this Mac awake')
@@ -1142,7 +1145,12 @@ def main():
             app = HS_DIR / 'bin/HangarSettings.app'
             if not app.is_dir():
                 raise RuntimeError('Ground Control is not installed. Run the Hangar installer first.')
-            run(['/usr/bin/open', str(app), '--args', '--tab', args.tab], required=True)
+            arguments = ['/usr/bin/open', str(app)]
+            if args.tab:
+                arguments += ['--args', '--tab', args.tab]
+            run(arguments, required=True)
+            if args.tab:
+                run([app / 'Contents/MacOS/hangar-settings', '--navigate', args.tab], required=True)
             return 0
         if args.command == 'shelf':
             config = resolve_user_config(default_kit())

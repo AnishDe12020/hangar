@@ -38,3 +38,5 @@ Notifications respect macOS notification permissions and Focus settings. They re
 Focus and reminder state is private to this Mac in `~/Library/Application Support/LeanMac/Sessions/state.json`. It is not part of dotfiles, shared configuration, releases or installation rollback. Invalid or unreadable state is preserved and reported instead of overwritten. Keep-awake sessions are intentionally not persisted.
 
 Timers use a one-shot deadline and wake events; idle sessions do not run a polling timer.
+
+Open Sessions directly with `hangar settings --tab sessions`. This also navigates an already-open Ground Control window, preserving unsaved settings edits. Notification clicks open Sessions too. Navigation waits for an active operation or dialog to finish.

@@ -37,6 +37,20 @@ class Configuration(unittest.TestCase):
         self.config.mkdir(parents=True, exist_ok=True)
         (self.config / name).write_text(text)
 
+    def test_settings_launch_preserves_page_unless_explicitly_requested(self):
+        hs = self.root / 'Hammerspoon'
+        app = hs / 'bin/HangarSettings.app'
+        app.mkdir(parents=True)
+        for tab in (None, 'sessions'):
+            argv = ['hangar', 'settings'] + (['--tab', tab] if tab else [])
+            with patch.object(lm, 'HS_DIR', hs), patch.object(sys, 'argv', argv), patch.object(lm, 'run') as run:
+                self.assertEqual(lm.main(), 0)
+                expected = [['/usr/bin/open', str(app)]]
+                if tab:
+                    expected[0] += ['--args', '--tab', tab]
+                    expected.append([app / 'Contents/MacOS/hangar-settings', '--navigate', tab])
+                self.assertEqual([call.args[0] for call in run.call_args_list], expected)
+
     def test_portable_doctor_cli_does_not_expose_raw_diagnostics(self):
         report = {'version': lm.VERSION, 'ok': False, 'warnings': 0,
                   'machine': 'private-host', 'checks': [{'name': 'settings-helper', 'status': 'fail', 'message': '/private/secret'}]}

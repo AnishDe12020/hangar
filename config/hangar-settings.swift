@@ -2,6 +2,9 @@ import AppKit
 import QuartzCore
 import UniformTypeIdentifiers
 
+let settingsNavigation = Notification.Name("local.hangar.settings.navigate")
+let settingsPages: Set<String> = ["general", "sessions", "shortcuts", "utilities", "maintenance"]
+
 // Ground Control is a view over the CLI's validated settings and transactions.
 // It does not edit application preferences or execute arbitrary shell strings.
 class ActionButton: NSButton {
@@ -79,7 +82,14 @@ func separator() -> NSView { let b = NSBox(); b.boxType = .separator; return b }
 final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NSSearchFieldDelegate {
     let cli: String
     let preview: Bool
+    let navigationName: Notification.Name
     var window: NSWindow!
+    let sidebar = NSView()
+    let sidebarContent = NSView()
+    private(set) var sidebarMaterial: NSView?
+    private var materialIsOpaque: Bool?
+    private var accessibilityObserver: NSObjectProtocol?
+    var reduceTransparency: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency }
     var content = NSStackView()
     var status = label("Loading settings…", size: 12, color: .secondaryLabelColor)
     var spinner = NSProgressIndicator()
@@ -110,6 +120,9 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var reminderList: NSStackView?
     var selected = "general"
     var busy = false
+    var pendingNavigation: String?
+    var modalDepth = 0
+    private var navigationObserver: NSObjectProtocol?
     var buttons: [NSButton] = []
     var configActions: [NSView] = []
     var navigation: [String: NSButton] = [:]
@@ -119,7 +132,7 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var diagnostics: [[String: Any]] = []
     let labels = ["general": "General", "sessions": "Sessions", "shortcuts": "Shortcuts", "utilities": "Quick Install", "maintenance": "Recovery"]
 
-    init(cli: String, tab: String, preview: Bool = false) { self.cli = cli; self.requestedTab = tab; self.preview = preview }
+    init(cli: String, tab: String, preview: Bool = false, navigationName: Notification.Name = settingsNavigation) { self.cli = cli; self.requestedTab = tab; self.preview = preview; self.navigationName = navigationName }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildWindow()
@@ -135,6 +148,27 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let window = window, window.isVisible || busy else { return .terminateNow }
         return windowShouldClose(window) ? .terminateNow : .terminateCancel
     }
+    func requestNavigation(_ page: String) {
+        guard settingsPages.contains(page) else { return }
+        pendingNavigation = page
+        if !preview { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+        applyPendingNavigation()
+    }
+    func applyPendingNavigation() {
+        guard !busy, !snapshot.isEmpty, modalDepth == 0, window.attachedSheet == nil,
+              NSApp.modalWindow == nil, let page = pendingNavigation else { return }
+        pendingNavigation = nil
+        if selected != page { window.makeFirstResponder(nil); select(page) }
+    }
+    func scheduleNavigation() {
+        DispatchQueue.main.async { [weak self] in self?.applyPendingNavigation() }
+    }
+    @discardableResult func showAlert(_ alert: NSAlert) -> NSApplication.ModalResponse {
+        modalDepth += 1
+        defer { modalDepth -= 1; scheduleNavigation() }
+        return alert.runModal()
+    }
+    func windowDidEndSheet(_ notification: Notification) { scheduleNavigation() }
     func buildMenu() {
         let main = NSMenu()
         let applicationItem = NSMenuItem(); main.addItem(applicationItem)
@@ -155,38 +189,26 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let alert = NSAlert(); alert.messageText = "Discard unsaved changes?"
             alert.informativeText = "Your active configuration has not changed."
             alert.addButton(withTitle: "Keep editing"); alert.addButton(withTitle: "Discard")
-            return alert.runModal() == .alertSecondButtonReturn
+            return self.showAlert(alert) == .alertSecondButtonReturn
         }
         return true
     }
 
     func buildWindow() {
+        navigationObserver = DistributedNotificationCenter.default().addObserver(forName: navigationName, object: nil, queue: .main) { [weak self] note in
+            guard let page = note.userInfo?["tab"] as? String else { return }
+            self?.requestNavigation(page)
+        }
         if !preview { buildMenu() }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Hangar Settings"; window.minSize = NSSize(width: 800, height: 580)
         window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true; window.delegate = self; window.center()
         let root: NSView = preview ? SettingsBackground() : NSView(); window.contentView = root
-        window.isOpaque = preview || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
-        window.backgroundColor = window.isOpaque ? .windowBackgroundColor : .clear
-        let sidebarContent = NSView()
-        let sidebar: NSView
-        if !preview, !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
-            #if compiler(>=6.2)
-            if #available(macOS 26.0, *) {
-                let glass = NSGlassEffectView(); glass.style = .regular; glass.cornerRadius = 0
-                glass.contentView = sidebarContent; sidebar = glass
-            } else {
-                let effect = NSVisualEffectView(); effect.material = .sidebar; effect.blendingMode = .behindWindow; effect.state = .followsWindowActiveState
-                effect.addSubview(sidebarContent); sidebar = effect
-            }
-            #else
-            let effect = NSVisualEffectView(); effect.material = .sidebar; effect.blendingMode = .behindWindow; effect.state = .followsWindowActiveState
-            effect.addSubview(sidebarContent); sidebar = effect
-            #endif
-        } else {
-            let effect = NSVisualEffectView(); effect.material = .sidebar; effect.blendingMode = .withinWindow; effect.state = .active
-            effect.addSubview(sidebarContent); sidebar = effect
-        }
+        sidebar.addSubview(sidebarContent)
+        updateSidebarMaterial()
+        accessibilityObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.updateSidebarMaterial() }
         sidebarContent.translatesAutoresizingMaskIntoConstraints = false
         sidebar.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(sidebar)
         let brand = label("Hangar", size: 16, weight: .semibold)
@@ -239,6 +261,41 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         ])
     }
 
+    deinit {
+        if let observer = navigationObserver { DistributedNotificationCenter.default().removeObserver(observer) }
+        if let observer = accessibilityObserver { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+    }
+
+    func updateSidebarMaterial() {
+        let opaque = preview || reduceTransparency()
+        guard materialIsOpaque != opaque else { return }
+        materialIsOpaque = opaque
+        window.isOpaque = opaque
+        window.backgroundColor = opaque ? .windowBackgroundColor : .clear
+        let material: NSView
+        if opaque {
+            material = SettingsBackground()
+        } else {
+            #if compiler(>=6.2)
+            if #available(macOS 26.0, *) {
+                let glass = NSGlassEffectView(); glass.style = .regular; glass.cornerRadius = 0
+                glass.contentView = NSView(); material = glass
+            } else {
+                let effect = NSVisualEffectView(); effect.material = .sidebar
+                effect.blendingMode = .behindWindow; effect.state = .followsWindowActiveState; material = effect
+            }
+            #else
+            let effect = NSVisualEffectView(); effect.material = .sidebar
+            effect.blendingMode = .behindWindow; effect.state = .followsWindowActiveState; material = effect
+            #endif
+        }
+        // Keep controls in their original hierarchy so editing and keyboard focus survive.
+        sidebarMaterial?.removeFromSuperview()
+        material.frame = sidebar.bounds; material.autoresizingMask = [.width, .height]
+        sidebar.addSubview(material, positioned: .below, relativeTo: sidebarContent)
+        sidebarMaterial = material
+    }
+
     func setBusy(_ value: Bool, _ text: String) {
         busy = value; status.stringValue = text
         if value { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
@@ -253,6 +310,7 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         if value { if let root = window?.contentView { capture(root) } }
         else {
+            scheduleNavigation()
             disabledControls.values.forEach { $0.0.isEnabled = $0.1 }; disabledControls.removeAll()
             let refreshHold = holdRefreshAfterBusy, refreshSessions = sessionRefreshAfterBusy
             holdRefreshAfterBusy = false; sessionRefreshAfterBusy = false
@@ -290,7 +348,7 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         setBusy(false, "Operation did not complete. Review the details below.")
         let alert = NSAlert(); alert.alertStyle = .warning; alert.messageText = "Hangar needs your attention"
         let detail = object(text)?["message"] as? String ?? object(text)?["error"] as? String ?? text
-        alert.informativeText = detail.isEmpty ? "Hangar returned no details. Run diagnostics in Recovery, then try again." : String(detail.suffix(2400)); alert.addButton(withTitle: "OK"); alert.runModal()
+        alert.informativeText = detail.isEmpty ? "Hangar returned no details. Run diagnostics in Recovery, then try again." : String(detail.suffix(2400)); alert.addButton(withTitle: "OK"); self.showAlert(alert)
     }
     func load() {
         setBusy(true, "Reading your configuration…")
@@ -305,7 +363,7 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         collect()
         if !changes().isEmpty {
             let a = NSAlert(); a.messageText = "Reload and discard unsaved changes?"; a.addButton(withTitle: "Keep editing"); a.addButton(withTitle: "Reload")
-            if a.runModal() != .alertSecondButtonReturn { return }
+            if self.showAlert(a) != .alertSecondButtonReturn { return }
         }
         catalog = []; requestedTab = selected; load()
     }
@@ -593,6 +651,7 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
     func windowDidBecomeKey(_ notification: Notification) {
+        scheduleNavigation()
         if selected == "sessions" && !busy { refreshHold(); refreshSessions() }
     }
     func collect() {
@@ -641,7 +700,7 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         if confirmApply { alert.addButton(withTitle: "Keep editing"); alert.addButton(withTitle: "Save & Apply") }
         else { alert.addButton(withTitle: "Done") }
-        return alert.runModal() == .alertSecondButtonReturn
+        return self.showAlert(alert) == .alertSecondButtonReturn
     }
     func save(apply: Bool) {
         guard !busy, !snapshot.isEmpty else { return }
@@ -757,7 +816,7 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let alert = NSAlert(); alert.alertStyle = .warning; alert.messageText = "Install \(entry["name"] as? String ?? id)?"
             alert.informativeText = entry["consent_message"] as? String ?? "This app uses a self-signed build. Its installer removes macOS quarantine. Continue only if you trust its publisher."
             alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Trust & Install")
-            if alert.runModal() != .alertSecondButtonReturn { return }; args.append("--allow-unnotarized")
+            if self.showAlert(alert) != .alertSecondButtonReturn { return }; args.append("--allow-unnotarized")
         }
         setBusy(true, "Installing \(entry["name"] as? String ?? id)…")
         run(args) { code, out, err in
@@ -783,7 +842,7 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let alert = NSAlert(); alert.messageText = "Rebuild Hangar from saved settings?"
             alert.informativeText = "Compiles the installed source kit, rebuilds native helpers and reloads Hangar. The previous installation is backed up."
             alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Rebuild & Apply")
-            if alert.runModal() == .alertSecondButtonReturn { self.activate() }
+            if self.showAlert(alert) == .alertSecondButtonReturn { self.activate() }
         }
         rebuild.controlSize = .small
         group(rows: [row("Installed helpers", rebuild, detail: "Hangar \(snapshot["version"] as? String ?? "unknown")")], detail: "Run checks to verify signatures and versions. Rebuild repairs missing or outdated helpers using saved configuration.")
@@ -820,7 +879,7 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let restore = ActionButton("Restore…") {
             let alert = NSAlert(); alert.messageText = "Restore the previous Hangar installation?"; alert.informativeText = "Hangar saves the current installation first. Desired settings files are retained; restore their separate settings backup if needed. Optional app installations and OS permissions are not rolled back."
             alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Restore")
-            guard alert.runModal() == .alertSecondButtonReturn else { return }
+            guard self.showAlert(alert) == .alertSecondButtonReturn else { return }
             self.setBusy(true, "Restoring the previous installation…")
             self.run(["rollback"]) { code, out, err in if code != 0 { self.fail(out + err) } else { self.setBusy(false, "Restored. Reopen settings to use that version.") } }
         }
@@ -839,11 +898,106 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 }
 
+func testSettingsAppearance() throws {
+    func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw NSError(domain: "GroundControlAppearanceTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+    }
+    let controller = GroundControl(cli: "/unavailable-fixture-cli", tab: "shortcuts")
+    var reduced = false
+    controller.reduceTransparency = { reduced }
+    controller.buildWindow(); controller.loadFixture()
+    controller.window.contentView?.layoutSubtreeIfNeeded()
+    guard let field = controller.fields["hotkeys.overview"], let initialMaterial = controller.sidebarMaterial else {
+        throw NSError(domain: "GroundControlAppearanceTest", code: 2)
+    }
+    field.stringValue = "ctrl-alt-cmd-f12"
+    controller.draft["fixtureUnsavedValue"] = "retained"
+    try require(controller.window.makeFirstResponder(field), "fixture text control accepts focus")
+    let responder = controller.window.firstResponder
+    let initialType = type(of: initialMaterial)
+    let sidebarChildren = controller.sidebarContent.subviews.map(ObjectIdentifier.init)
+    let contentChildren = controller.content.arrangedSubviews.map(ObjectIdentifier.init)
+    for opaque in [true, false, true, false] {
+        reduced = opaque
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        try require(controller.window.isOpaque == opaque, "window opacity follows accessibility notification")
+        try require((controller.sidebarMaterial is SettingsBackground) == opaque, "opaque fallback replaces native material")
+        if !opaque { try require(type(of: controller.sidebarMaterial!) == initialType, "native material restored") }
+        try require(controller.sidebar.subviews.count == 2 && controller.sidebar.subviews.last === controller.sidebarContent, "persistent content stays above one material")
+        try require(controller.sidebarContent.subviews.map(ObjectIdentifier.init) == sidebarChildren, "sidebar controls retained")
+        try require(controller.content.arrangedSubviews.map(ObjectIdentifier.init) == contentChildren, "content controls retained")
+        try require(controller.fields["hotkeys.overview"] === field && field.stringValue == "ctrl-alt-cmd-f12", "uncollected text edit retained")
+        try require(controller.draft["fixtureUnsavedValue"] as? String == "retained" && controller.selected == "shortcuts", "draft and navigation retained")
+        try require(controller.window.firstResponder === responder, "first responder retained")
+        let material = controller.sidebarMaterial
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        try require(controller.sidebarMaterial === material, "unchanged setting avoids rebuilding material")
+    }
+    print("PASS: native accessibility notifications swap opaque/material backgrounds four times, preserving hierarchy, draft, text edits, selection and first responder")
+}
+
+func testSettingsNavigation() throws {
+    func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw NSError(domain: "GroundControlNavigationTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+    }
+    let fixtureID = UUID().uuidString
+    let controller = GroundControl(cli: "/unavailable-fixture-cli", tab: "shortcuts", preview: true, navigationName: Notification.Name(settingsNavigation.rawValue + ".fixture." + fixtureID))
+    controller.buildWindow(); controller.loadFixture()
+    controller.fields["hotkeys.overview"]?.stringValue = "ctrl-alt-cmd-f12"
+    controller.requestNavigation("unknown")
+    try require(controller.pendingNavigation == nil && controller.selected == "shortcuts", "unknown pages ignored")
+    controller.setBusy(true, "Fixture operation")
+    controller.requestNavigation("sessions")
+    try require(controller.selected == "shortcuts", "busy operation retains page and controls")
+    controller.setBusy(false, "Fixture complete")
+    controller.applyPendingNavigation()
+    try require(controller.selected == "sessions" && controller.pendingNavigation == nil, "pending navigation delivered after operation")
+    try require((controller.draft["hotkeys"] as? [String: String])?["overview"] == "ctrl-alt-cmd-f12", "uncollected edit survives navigation")
+    controller.modalDepth = 1
+    controller.requestNavigation("general")
+    try require(controller.selected == "sessions", "modal interaction defers navigation")
+    controller.modalDepth = 0; controller.applyPendingNavigation()
+    try require(controller.selected == "general", "modal completion delivers pending page")
+    controller.requestNavigation("shortcuts")
+    try require(controller.fields["hotkeys.overview"]?.stringValue == "ctrl-alt-cmd-f12", "returning to editor restores unsaved edit")
+    let field = controller.fields["hotkeys.overview"]
+    controller.requestNavigation("shortcuts")
+    try require(controller.fields["hotkeys.overview"] === field, "current-page request preserves control identity")
+    let sender = Process(); sender.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    sender.arguments = ["--self-test-navigation-send", fixtureID]
+    try sender.run(); sender.waitUntilExit()
+    let deadline = Date(timeIntervalSinceNow: 2)
+    while controller.selected != "sessions" && Date() < deadline {
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+    }
+    try require(sender.terminationStatus == 0 && controller.selected == "sessions", "separate process delivers navigation to existing controller")
+    print("PASS: Settings navigation validates pages, defers while busy/modal, preserves unsaved edits and avoids rebuilding the current page")
+}
+
 let arguments = CommandLine.arguments
 func argument(_ name: String) -> String? { guard let i = arguments.firstIndex(of: name), i + 1 < arguments.count else { return nil }; return arguments[i + 1] }
+if let fixture = argument("--self-test-navigation-send"), let id = UUID(uuidString: fixture) {
+    DistributedNotificationCenter.default().postNotificationName(Notification.Name(settingsNavigation.rawValue + ".fixture." + id.uuidString), object: nil, userInfo: ["tab": "sessions"], deliverImmediately: true)
+    exit(0)
+}
+if arguments.contains("--navigate") {
+    guard let page = argument("--navigate"), settingsPages.contains(page) else {
+        fputs("Unknown Settings page\n", stderr); exit(2)
+    }
+    DistributedNotificationCenter.default().postNotificationName(settingsNavigation, object: nil, userInfo: ["tab": page], deliverImmediately: true)
+    exit(0)
+}
 let isPreview = argument("--render-preview") != nil
 let app = NSApplication.shared
-app.setActivationPolicy(isPreview ? .prohibited : .regular)
+app.setActivationPolicy(isPreview || (arguments.contains("--self-test-appearance") || arguments.contains("--self-test-navigation")) ? .prohibited : .regular)
+if arguments.contains("--self-test-appearance") {
+    do { try testSettingsAppearance(); exit(0) }
+    catch { fputs("FAIL: \(error.localizedDescription)\n", stderr); exit(1) }
+}
+if arguments.contains("--self-test-navigation") {
+    do { try testSettingsNavigation(); exit(0) }
+    catch { fputs("FAIL: \(error.localizedDescription)\n", stderr); exit(1) }
+}
 if isPreview { app.appearance = NSAppearance(named: arguments.contains("--light") ? .aqua : .darkAqua) }
 let controller = GroundControl(cli: argument("--cli") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hangar").path, tab: argument("--tab") ?? "general", preview: isPreview)
 app.delegate = controller
