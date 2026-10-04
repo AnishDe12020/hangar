@@ -651,7 +651,8 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
     var updatingSelection = false
     var sharingPicker: NSSharingServicePicker?
     var activeTool: ToolCancellation?
-    var quitAfterTool = false
+    var quitAfterWork = false, quitReplySent = false
+    var terminationReply: (Bool) -> Void = { NSApp.reply(toApplicationShouldTerminate: $0) }
     let queue = OperationQueue()
     var previewURLs = [URL](), pendingReceivers = [UUID: NSFilePromiseReceiver]()
     var lastState: ShelfState?, initialPaths: [String], appearance: String
@@ -675,6 +676,9 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         instance.listen { [weak self] request in
             guard let self = self else { return }
             if request.quit == true { NSApp.terminate(nil); return }
+            if self.quitAfterWork {
+                try? self.instance.respond(to: request, with: ShelfResponse(ok: false, added: 0, error: "Apron is finishing incoming files before quitting. Try again after it exits.")); return
+            }
             if let enabled = request.shakeEnabled { self.shakeEnabled = enabled; self.configureDragMonitor() }
             if let style = request.style, style != self.style { self.applyStyle(style) }
             let previousCount = self.store.items.count
@@ -704,11 +708,16 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         if !background { show() }
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let tool = activeTool else { return .terminateNow }
-        quitAfterTool = true; tool.cancel()
-        statusSummary?.title = "Cancelling Quick Tool before quitting…"
-        // All menu, IPC and system quit requests wait for the worker's write cleanup.
+        guard activeTool != nil || !pendingReceivers.isEmpty else { return .terminateNow }
+        quitAfterWork = true; activeTool?.cancel()
+        statusSummary?.title = pendingReceivers.isEmpty ? "Cancelling Quick Tool before quitting…" : "Waiting for incoming files before quitting…"
+        // File promises have no public cancellation API. Keep their receivers and
+        // callbacks alive until all writes finish and their shelf references save.
         return .terminateLater
+    }
+    func completeQuitIfReady() {
+        guard quitAfterWork, !quitReplySent, activeTool == nil, pendingReceivers.isEmpty else { return }
+        quitReplySent = true; terminationReply(true)
     }
     func applicationWillTerminate(_ notification: Notification) {
         if let monitor = dragMonitor { NSEvent.removeMonitor(monitor) }
@@ -969,9 +978,12 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         do { try operation(); if before != store.state { lastState = before }; refresh() }
         catch { report(error) }
     }
-    func report(_ error: Error) { status.stringValue = error.localizedDescription; pendingErrors.append(error); presentNextError() }
+    func report(_ error: Error) {
+        if quitAfterWork { fputs("Apron: " + error.localizedDescription + "\n", stderr); return }
+        status.stringValue = error.localizedDescription; pendingErrors.append(error); presentNextError()
+    }
     func presentNextError() {
-        guard panel.attachedSheet == nil, !pendingErrors.isEmpty else { return }
+        guard !quitAfterWork, panel.attachedSheet == nil, !pendingErrors.isEmpty else { return }
         let alert = NSAlert(error: pendingErrors.removeFirst())
         alert.beginSheetModal(for: panel) { [weak self] _ in DispatchQueue.main.async { self?.presentNextError() } }
     }
@@ -999,8 +1011,9 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         return canImport(info.draggingPasteboard) ? .copy : []
     }
     func collectionView(_ collectionView: NSCollectionView, acceptDrop info: NSDraggingInfo, indexPath: IndexPath, dropOperation: NSCollectionView.DropOperation) -> Bool { importPasteboard(info.draggingPasteboard, receivingDrag: true) }
-    func canImport(_ pasteboard: NSPasteboard) -> Bool { pasteboard.availableType(from: dragTypes) != nil }
+    func canImport(_ pasteboard: NSPasteboard) -> Bool { !quitAfterWork && pasteboard.availableType(from: dragTypes) != nil }
     @discardableResult func importPasteboard(_ pasteboard: NSPasteboard, receivingDrag: Bool = false) -> Bool {
+        guard !quitAfterWork else { return false }
         // AppKit raises an exception if promises are received outside a real drag callback.
         if receivingDrag, let receivers = pasteboard.readObjects(forClasses: [NSFilePromiseReceiver.self], options: nil) as? [NSFilePromiseReceiver], !receivers.isEmpty {
             receivePromises(receivers); return true
@@ -1041,12 +1054,16 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     completed += 1
-                    if let error = error { self.report(error) }
-                    else { self.perform { try self.store.receive(url, in: folder, groupID: groupID) } }
-                    if completed >= max(1, receiver.fileNames.count) { self.pendingReceivers.removeValue(forKey: id) }
+                    self.receivePromiseFile(url, error: error, folder: folder, groupID: groupID, receiverID: id, finished: completed >= max(1, receiver.fileNames.count))
                 }
             }
         }
+    }
+    func receivePromiseFile(_ url: URL, error: Error?, folder: URL, groupID: UUID, receiverID: UUID, finished: Bool) {
+        if let error = error { report(error) }
+        else { perform { try store.receive(url, in: folder, groupID: groupID) } }
+        if finished { pendingReceivers.removeValue(forKey: receiverID) }
+        completeQuitIfReady()
     }
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
@@ -1159,6 +1176,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         alert.window.makeFirstResponder(pages)
     }
     func chooseToolDestination(name: String, type: UTType, inputs: [URL], completion: @escaping (URL) -> Void) {
+        guard !quitAfterWork else { return }
         let save = NSSavePanel(); save.nameFieldStringValue = name; save.allowedContentTypes = [type]; save.canCreateDirectories = true
         save.directoryURL = inputs.first?.deletingLastPathComponent()
         save.prompt = "Save New Copy"; save.message = "Choose a new filename. Existing files, including the originals, will never be replaced."
@@ -1170,7 +1188,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
     }
     @objc func cancelQuickTool(_ sender: Any?) { activeTool?.cancel(); statusSummary?.title = "Cancelling Quick Tool…" }
     func runQuickTool(title: String, successTitle: String, groupID: UUID, work: @escaping (ToolCancellation) throws -> ToolResult) {
-        guard activeTool == nil else { return }
+        guard activeTool == nil, !quitAfterWork else { return }
         let cancel = ToolCancellation(), progress = NSAlert(); activeTool = cancel
         progress.messageText = title; progress.informativeText = "Creating a new copy. Your original files stay unchanged. Cancelling may take a moment while macOS finishes the current file, page or image."
         progress.addButton(withTitle: "Cancel"); statusSummary?.title = title
@@ -1183,9 +1201,9 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
                 guard let self = self else { return }
                 self.activeTool = nil
                 if let parent = progress.window.sheetParent { parent.endSheet(progress.window, returnCode: .alertSecondButtonReturn) }
-                if self.quitAfterTool { NSApp.reply(toApplicationShouldTerminate: true); return }
+                if self.quitAfterWork { self.completeQuitIfReady(); return }
                 DispatchQueue.main.async {
-                    guard !self.quitAfterTool else { return }
+                    guard !self.quitAfterWork else { return }
                     switch result {
                     case .success(let output):
                         do {
@@ -1206,6 +1224,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         }
     }
     @objc func addFiles(_ sender: Any?) {
+        guard !quitAfterWork else { return }
         let open = NSOpenPanel(); open.canChooseDirectories = true; open.canChooseFiles = true; open.allowsMultipleSelection = true; open.prompt = "Add to Shelf"; open.message = "Original files stay in their current location."
         open.beginSheetModal(for: panel) { [weak self] response in guard response == .OK, let self = self else { return }; self.perform { try self.store.addFiles(open.urls) } }
     }
@@ -1557,11 +1576,32 @@ func runPasteboardTests() throws {
     let controller = ShelfController(store: store, instance: instance, paths: [], appearance: "system", shakeEnabled: false)
     controller.buildWindow(fixture: true)
     let quittingTool = ToolCancellation(); controller.activeTool = quittingTool
-    try require(controller.applicationShouldTerminate(app) == .terminateLater && controller.quitAfterTool, "quit is deferred while Quick Tools owns a worker")
+    try require(controller.applicationShouldTerminate(app) == .terminateLater && controller.quitAfterWork, "quit is deferred while Quick Tools owns a worker")
     do { try quittingTool.check(); throw ShelfError.invalid("quit must cancel active Quick Tool") }
     catch is CancellationError { }
-    controller.activeTool = nil; controller.quitAfterTool = false
+    controller.activeTool = nil; controller.quitAfterWork = false
     try require(controller.applicationShouldTerminate(app) == .terminateNow, "idle quit does not wait")
+    let receiverID = UUID(), promiseFolder = store.imports.appendingPathComponent("Quit fixture")
+    try FileManager.default.createDirectory(at: promiseFolder, withIntermediateDirectories: false)
+    let firstPromise = promiseFolder.appendingPathComponent("First.txt"), lastPromise = promiseFolder.appendingPathComponent("Last.txt")
+    try Data("first complete".utf8).write(to: firstPromise); try Data("last complete".utf8).write(to: lastPromise)
+    controller.pendingReceivers[receiverID] = NSFilePromiseReceiver()
+    let concurrentTool = ToolCancellation(); controller.activeTool = concurrentTool
+    var replies = 0, persistedAtReply = false
+    controller.terminationReply = { allow in
+        replies += 1
+        persistedAtReply = allow && (try? ShelfStore(directory: root).items.count) == 2
+    }
+    try require(controller.applicationShouldTerminate(app) == .terminateLater, "quit waits for both file promises and Quick Tools")
+    controller.activeTool = nil; controller.completeQuitIfReady()
+    try require(replies == 0, "finished Quick Tool cannot exit while promise writes remain")
+    controller.receivePromiseFile(firstPromise, error: nil, folder: promiseFolder, groupID: store.state.active, receiverID: receiverID, finished: false)
+    try require(replies == 0 && store.items.count == 1, "first promised file saves without releasing quit early")
+    controller.receivePromiseFile(lastPromise, error: nil, folder: promiseFolder, groupID: store.state.active, receiverID: receiverID, finished: true)
+    controller.completeQuitIfReady()
+    try require(replies == 1 && persistedAtReply && controller.pendingReceivers.isEmpty, "quit replied once only after every promised reference was persisted")
+    try store.remove(ids: Set(store.items.map(\.id)))
+    controller.quitAfterWork = false; controller.quitReplySent = false; controller.refresh()
     let board = NSPasteboard.withUniqueName()
     defer { board.releaseGlobally() }
     guard board.setString("A clipboard note 🛫", forType: .string) else { throw ShelfError.invalid("The tool sandbox denied private pasteboard access. Run this native integration test from a normal macOS session.") }

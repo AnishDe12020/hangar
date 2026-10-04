@@ -16,6 +16,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -617,7 +618,43 @@ def reload_agents(manifest):
                 USER_DIR / f'Library/LaunchAgents/local.leanmac.{app}.plist'], required=True)
 
 
+def stop_shelf_for_update():
+    """Wait for Apron's graceful exit before replacing its executable or resources."""
+    lock = STATE / 'Apron/instance.lock'
+    try:
+        descriptor = os.open(lock, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise RuntimeError('Cannot verify Apron instance lock; close Apron and check its state directory before retrying.') from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RuntimeError('Apron instance lock must be a regular file.')
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return  # No running instance: do not launch a helper just to quit it.
+        except BlockingIOError:
+            pass
+        deadline = time.monotonic() + 20
+        helper = HS_DIR / 'bin/HangarShelf.app/Contents/MacOS/hangar-shelf'
+        code, _, _ = run([helper, '--quit'], timeout=5)
+        if code:
+            raise RuntimeError('Apron could not be asked to quit. Quit Apron normally, then retry the update.')
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError('Apron is still finishing work. Let it quit normally, then retry the update; no files were replaced by this step.')
+                time.sleep(min(0.1, remaining))
+    finally:
+        os.close(descriptor)
+
+
 def restore_transaction(backup, manifest):
+    stop_shelf_for_update()
     errors = []
     # A preference failure must never prevent the core shortcut files being restored.
     for action in (lambda: restore_extras(backup, manifest),
@@ -773,6 +810,9 @@ def install(kit, check_only=False, extras=False):
             shutil.copy2(source, backup / 'candidate' / str(i))
         manifest['hashes'] = {str(dest): hashlib.sha256(source.read_bytes()).hexdigest() for dest, source in staged.items()}
         save_manifest(backup, manifest)
+        # A failed quit has not changed live files and must not trigger another quit
+        # through automatic restoration while the first request is still pending.
+        stop_shelf_for_update()
         def interrupted(signum, frame):
             raise RuntimeError(f'Installation interrupted by signal {signum}')
         handlers = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGINT)}
