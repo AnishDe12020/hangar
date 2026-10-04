@@ -21,7 +21,7 @@ import tempfile
 import time
 import tomllib
 
-VERSION = '2026.09.17.2'
+VERSION = '2026.10.04.1'
 USER_DIR = Path.home()
 STATE = USER_DIR / 'Library/Application Support/LeanMac'
 CONFIG = USER_DIR / '.aerospace.toml'
@@ -427,12 +427,15 @@ def restore_transaction(backup, manifest):
 
 
 def install(kit, check_only=False, extras=False):
+    if kit is None:
+        raise RuntimeError('No source kit found. Extract a release and pass install --kit /path/to/LeanMac')
     kit = kit.resolve()
     profile = selected_profile()
     candidate = kit / 'config' / ('aerospace.toml' if profile == 'default' else f'aerospace-{profile}.toml')
     if not candidate.is_file():
         raise RuntimeError(f'Selected profile does not exist: {candidate}')
-    with install_lock(), tempfile.TemporaryDirectory(prefix='leanmac-stage-') as temp:
+    # Staging does not write locks or state into the user's installation.
+    with (contextlib.nullcontext() if check_only else install_lock()), tempfile.TemporaryDirectory(prefix='leanmac-stage-') as temp:
         stage = Path(temp)
         staged = {}
         for name in LUA_FILES:
@@ -644,7 +647,7 @@ def default_kit():
         previous = (STATE / 'last-install').read_text().strip()
         return Path(json.loads((STATE / 'backup' / previous / 'manifest.json').read_text())['kit'])
     except (OSError, ValueError, KeyError):
-        return USER_DIR / 'Library/Mobile Documents/com~apple~CloudDocs/LeanMac'
+        return None
 
 
 def main():

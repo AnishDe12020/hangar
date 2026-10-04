@@ -20,7 +20,7 @@ class Transactions(unittest.TestCase):
         self.user = self.root / 'user'
         self.user.mkdir()
         self.kit = self.root / 'kit'
-        shutil.copytree(KIT, self.kit, ignore=shutil.ignore_patterns('__pycache__'))
+        shutil.copytree(KIT, self.kit, ignore=shutil.ignore_patterns('__pycache__', '.git', 'dist', 'work'))
         self.state = self.user / 'Library/Application Support/LeanMac'
         self.hs = self.user / '.hammerspoon'
         self.hs.mkdir()
@@ -60,6 +60,18 @@ class Transactions(unittest.TestCase):
     def manifests(self):
         return [json.loads(p.read_text()) for p in (self.state / 'backup').glob('*/manifest.json')]
 
+    def test_installed_cli_requires_source_instead_of_assuming_icloud(self):
+        with patch.object(lm, '__file__', str(self.user / '.local/lib/leanmac/leanmac.py')):
+            self.assertIsNone(lm.default_kit())
+        with self.assertRaisesRegex(RuntimeError, 'No source kit found'):
+            lm.install(None)
+        self.assertFalse(self.state.exists())
+
+    def test_check_does_not_create_persistent_state(self):
+        lm.install(self.kit, check_only=True)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.config.read_bytes(), b'old config bytes\n')
+
     def test_compile_failure_never_touches_live_files(self):
         self.fail_on = 'swiftc'
         with self.assertRaisesRegex(RuntimeError, 'injected'):
@@ -96,8 +108,8 @@ class Transactions(unittest.TestCase):
         config = lm.validate_config(self.kit / 'config/aerospace-numbered-study.toml')
         keys = config['mode']['main']['binding']
         self.assertEqual(config['default-root-container-orientation'], 'vertical')
-        self.assertEqual(keys['alt-slash'], 'layout tiles')
-        self.assertEqual(keys['alt-shift-slash'], 'layout accordion')
+        self.assertEqual(keys['alt-slash'], 'layout h_tiles')
+        self.assertEqual(keys['alt-shift-slash'], 'layout v_accordion')
         self.assertFalse(any('flatten-workspace-tree' in str(v) for v in keys.values()))
         self.assertEqual(keys['alt-f'], 'fullscreen')
 

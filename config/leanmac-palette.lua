@@ -81,9 +81,7 @@ function C.refresh()
     add(choices, actions, 'separate', 'Separate this window', '⌥⇧P · return to a standalone view', function() leanmac.groups.separate() end)
     add(choices, actions, 'hs-reload', 'Reload Hammerspoon', '⌃⌥⌘R · reload utility config', hs.reload)
     add(choices, actions, 'gather', 'Gather windows from extra macOS Desktops…', '⌃⌥⌘S · moves windows; does not delete Desktops', function()
-      if hs.dialog.blockAlert('Gather windows?', 'Move windows from extra native Desktops onto the current Desktop on each display?', 'Gather', 'Cancel') == 'Gather' then
-        leanmac.spaces.collapseNow()
-      end
+      leanmac.spaces.collapseNow()
     end)
     for _, zone in ipairs({'left', 'right', 'up', 'down'}) do
       local z = zone

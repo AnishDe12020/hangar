@@ -1,5 +1,5 @@
 -- LeanMac: AeroSpace owns windows; Hammerspoon owns utility shortcuts.
-local M = {version = '2026.09.17.2'}
+local M = {version = '2026.10.04.1'}
 local mods = {'ctrl', 'alt', 'cmd'}
 local cli = hs.fs.attributes('/opt/homebrew/bin/aerospace') and '/opt/homebrew/bin/aerospace' or '/usr/local/bin/aerospace'
 M.tasks = {}
