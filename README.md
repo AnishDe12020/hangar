@@ -50,7 +50,7 @@ The default profile has four workspaces: **W**ork, **B**rowser, **S**ocial, and 
 
 The `numbered-study` profile has **1 Work, 2 Study, 3 Social, 4 Misc**. Windows are shown one at a time, with explicit split pairs inside each activity. **Option + /** shows the current group side by side; **Option + Shift + /** returns it to the one-window view. See [profiles](docs/profiles.md) for selection and routing.
 
-AeroSpace workspaces and macOS native Desktops are different systems. Hangar leaves native Desktops alone until you explicitly confirm **Gather windows**. Gathering moves windows onto the active Desktop on each display; it does not delete Desktops. [Read about native Desktops](docs/profiles.md#native-desktops).
+AeroSpace workspaces and macOS native Desktops are different systems. Hangar leaves native Desktops alone until you explicitly confirm **Gather windows**. Gathering moves windows onto the active Desktop on each display; it does not delete Desktops. [Read about native Desktops](docs/profiles.md#native-desktops-and-mouse-buttons).
 
 ## Recover confidently
 
