@@ -25,8 +25,13 @@ def main():
         with tempfile.TemporaryDirectory(prefix='leanmac-check-') as directory:
             lm.USER_DIR = Path(directory)
             lm.STATE = lm.USER_DIR / 'state'
+            lm.user_config_dir = lambda: lm.USER_DIR / '.config/hangar'
             lm.CONFIG = lm.USER_DIR / '.aerospace.toml'
             lm.HS_DIR = lm.USER_DIR / '.hammerspoon'
+            desired = lm.user_config_dir()
+            desired.mkdir(parents=True)
+            (desired / 'settings.toml').write_text('schema=1\nprofile="numbered-study"\n[apps]\nterminal="Terminal"\n[hotkeys]\noverview="ctrl-alt-u"\n')
+            (desired / 'settings.local.toml').write_text('[apps]\nbrowser="Safari"\n')
             lm.install(ROOT, check_only=True)
             assert not lm.STATE.exists(), 'Staging wrote persistent state'
             assert not lm.CONFIG.exists(), 'Staging activated a configuration'

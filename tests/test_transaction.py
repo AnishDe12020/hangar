@@ -1,6 +1,7 @@
 """Failure injection uses temporary paths and fake services; never the live Mac."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -30,7 +31,7 @@ class Transactions(unittest.TestCase):
         self.init = self.hs / 'init.lua'
         self.init.write_text('-- unrelated user customization\nuserSetting = 42\n')
         self.patches = [patch.object(lm, 'USER_DIR', self.user), patch.object(lm, 'STATE', self.state),
-            patch.object(lm, 'CONFIG', self.config), patch.object(lm, 'HS_DIR', self.hs),
+            patch.object(lm, 'user_config_dir', lambda: self.user / '.config/hangar'), patch.object(lm, 'CONFIG', self.config), patch.object(lm, 'HS_DIR', self.hs),
             patch.object(lm, 'run', self.fake_run), patch.object(lm, 'runtime_check'),
             patch.object(lm.time, 'sleep'), patch.object(lm, 'reload_previous', return_value=[])]
         for p in self.patches:
@@ -166,6 +167,46 @@ class Transactions(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), b'old config bytes\n')
         self.assertFalse((self.user / '.local/bin/leanmac').exists())
         self.assertTrue(any(m['status'] == 'saved' for m in self.manifests()))
+
+    def test_apply_compiles_persistent_settings_and_rollback_leaves_desired_sources(self):
+        directory = self.user / '.config/hangar'
+        directory.mkdir(parents=True)
+        source = directory / 'settings.toml'
+        source.write_text('schema = 1\n[apps]\nterminal = "Custom Terminal"\n[hotkeys]\noverview = "ctrl-alt-o"\n')
+        before = source.read_bytes()
+        lm.install(self.kit)
+        generated = self.hs / 'hangar-settings.lua'
+        self.assertIn('Custom Terminal', generated.read_text())
+        self.assertIn('["mods"]={"ctrl","alt"}', generated.read_text())
+        self.assertTrue((self.hs / 'hangar-config.lua').exists())
+        lm.rollback('last')
+        self.assertFalse(generated.exists())
+        self.assertFalse((self.hs / 'hangar-config.lua').exists())
+        self.assertEqual(source.read_bytes(), before)
+
+    def test_xdg_duplicate_rollback_survives_environment_change(self):
+        # External XDG roots and symlink duplicates are supported without touching
+        # the symlink target. Rescue backups must retain the location too.
+        duplicate = self.root / 'external-config/aerospace/aerospace.toml'
+        duplicate.parent.mkdir(parents=True)
+        source = self.root / 'original.toml'
+        source.write_text('original duplicate')
+        duplicate.symlink_to(source)
+        with patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.root / 'external-config')}):
+            lm.install(self.kit)
+        self.assertFalse(duplicate.exists())
+        self.assertEqual(source.read_text(), 'original duplicate')
+        with patch.dict(os.environ, {'XDG_CONFIG_HOME': ''}):
+            self.assertEqual(lm.xdg_config_root(), self.user / '.config')
+            lm.rollback('last')
+        self.assertTrue(duplicate.is_symlink())
+        self.assertEqual(duplicate.read_text(), 'original duplicate')
+        rescue = next(p.parent for p in (self.state / 'backup').glob('*/manifest.json')
+                      if json.loads(p.read_text()).get('status') == 'saved')
+        with patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.root / 'different')}):
+            lm.rollback(rescue.name)
+        self.assertFalse(duplicate.exists())
+        self.assertEqual(source.read_text(), 'original duplicate')
 
     def test_upgrade_reuses_legacy_profile_and_restores_old_cli(self):
         self.state.mkdir(parents=True)

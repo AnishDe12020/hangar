@@ -41,12 +41,14 @@ Dotfiles managers should delegate to this installer. Do not separately symlink o
 
 Hangar is the new product and repository name. Existing installations upgrade in place:
 
-1. Keep your current kit and backups. If you use custom routing, copy your original profile into the new kit as `config/aerospace-local.toml` and select `local` as described in [profiles](profiles.md).
+1. Keep your current kit and backups. If you use custom routing, copy your original profile to `~/.config/hangar/aerospace.toml` as described in [profiles](profiles.md).
 2. From the extracted Hangar kit, run `bash install.command --check` and then `bash install.command --configs-only` to update configuration/helpers without changing Shottr/Thaw preferences.
-3. Use `hangar doctor` and `hangar backups`. Your existing profile selector and transactional backups remain available. Existing `leanmac` commands also work.
+3. Use `hangar doctor` and `hangar backups`. Your existing profile selector and transactional backups remain available. Without settings files, Ghostty/Brave launcher defaults are retained; `config init` deliberately switches defaults to Terminal/Safari. Existing `leanmac` commands also work.
 
 **One stable storage namespace:** both new and upgraded installs use `~/Library/Application Support/LeanMac`. Hangar intentionally retains the internal `leanmac` Lua global/module names, linked-pair settings, helper file/bundle identifiers, launch-agent identifiers, and `.local/lib/leanmac` location. These are compatibility identifiers, not a second installation. Do not rename or delete them manually, and do not create a separate Hangar state folder.
 
 Each upgrade backs up the old CLI/core along with managed configuration, including whether `hangar` existed. Rolling back that upgrade restores the prior LeanMac files and removes the newly added `hangar` command if it was absent before. Use the restored `leanmac` command, or `bash bin/hangar rollback BACKUP_NAME` from the retained kit. Older historical backups remain accepted; when they restore an older CLI/core, any surviving `hangar` alias uses that older core. A snapshot that predates the CLI may require the retained kit for subsequent commands.
 
 No backup files are copied or rewritten just for the name change. Existing Hammerspoon initialization is detected, so upgrading does not add a duplicate `require("leanmac")` line.
+
+Configuration apply and normal kit updates read the same persistent input directory. They compile settings into `~/.hammerspoon/hangar-settings.lua` alongside the active configuration. Source TOML and host overrides are never overwritten by installation or rollback. Rolling back restores active copies; revert the source Git change separately before applying again.

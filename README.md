@@ -16,7 +16,21 @@ You need macOS, [Homebrew](https://brew.sh), and Apple's Command Line Tools (`xc
 
 Already have all dependencies? Use `bash install.command --configs-only`. To compile and validate without activation, use `bash install.command --check`; it does not install dependencies or replace active configuration.
 
-## Learn five shortcuts
+## Make it yours
+
+```sh
+hangar config init                 # create portable defaults; does not activate
+hangar config show --json          # effective settings and source paths
+# Edit ~/.config/hangar/settings.toml, then:
+hangar config check               # validate without changing the desktop
+hangar config apply --kit /path/to/Hangar
+```
+
+Choose launchers and supported shortcuts in `settings.toml`. Keep full app routing, workspace names, display roles and gaps in an optional `aerospace.toml` beside it. These inputs survive kit updates. A `settings.local.toml` overlay keeps host-only choices separate. [Configuration guide](docs/profiles.md)
+
+Git can share the source folder across Macs; each Mac validates and applies deliberately. Dotfiles manages the links, Hangar manages active copies and rollback. The bundled [hangar-config agent skill](skills/hangar-config/SKILL.md) can make these edits from a request such as “use Safari on this Mac and open the overview with Control+Option+O.” [Install the skill](docs/profiles.md#ai-assisted-configuration)
+
+## Learn five default shortcuts
 
 | Shortcut | Action |
 | --- | --- |

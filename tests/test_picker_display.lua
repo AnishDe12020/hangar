@@ -148,6 +148,7 @@ env.require = function(name)
 end
 setmetatable(env, {__index = _G})
 rawset(_G, 'leanmac', {overview = {scheduleRefresh = function() overviewSends = overviewSends + 1 end}})
+HANGAR_TEST_CONFIGURE(env)
 local P = assert(loadfile(KIT .. '/config/window-picker.lua', 't', env))()
 
 local function w(id, pid, app, title, ws, monitor, layout, root, visible, focused)

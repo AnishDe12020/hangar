@@ -1,3 +1,4 @@
+local U = require('hangar-config')
 -- Explicit split pairs. AeroSpace owns the tree; there is no shadow layout or polling.
 local R = require('leanmac-runtime')
 local links = require('window-links')
@@ -432,7 +433,7 @@ function G.pair(origin, partner, note, expected, preserveLayout)
                             abort(ctx, 'The linked pair changed before completion'); return
                           end
                           links.link(origin, partner)
-                          local message = note or 'Split ready · ⌥F zoom · ⌥⇧P separate'
+                          local message = note or 'Split ready · ' .. U.label('separate') .. ' separate'
                           restoreScratchView(ctx, function(restored)
                             G.lastWorkspaceCleanup = restored
                             if not restored then fail('Pair ready, but temporary workspace cleanup failed'); return end
@@ -549,13 +550,13 @@ function G.choose(origin)
   leanmac.picker.refresh()
 end
 local menuItems = {
-  {id='pair', text='Pair with another window…', subText='⌥P · choose a window in this space'},
-  {id='separate', text='Separate this window', subText='⌥⇧P · leave the other split windows intact'},
-  {id='zoom', text='Zoom / unzoom this window', subText='⌥F · AeroSpace fullscreen, no macOS Desktop'},
-  {id='tiles', text='Show this group side by side / tiled', subText='⌥/ · preserve the grouping tree'},
-  {id='stack', text='Stack this group', subText='⌥⇧/ · preserve the grouping tree'},
-  {id='balance', text='Balance sizes in this space', subText='⌥⇧= · equalize split widths'},
-  {id='float', text='Toggle freeform floating', subText='⌥⇧Space · existing ⌥arrows / edge snapping stay freeform'},
+  {id='pair', text='Pair with another window…', subText=U.label('pair') .. ' · choose a window in this space'},
+  {id='separate', text='Separate this window', subText=U.label('separate') .. ' · leave the other split windows intact'},
+  {id='zoom', text='Zoom / unzoom this window', subText='AeroSpace fullscreen, no macOS Desktop'},
+  {id='tiles', text='Show this group side by side / tiled', subText='Preserve the grouping tree'},
+  {id='stack', text='Stack this group', subText='Preserve the grouping tree'},
+  {id='balance', text='Balance sizes in this space', subText='Equalize split widths'},
+  {id='float', text='Toggle freeform floating', subText='Freeform floating / tiling'},
   {id='reset', text='Reset this space to standalone windows…', subText='Confirmation required · removes ALL splits in this space'},
 }
 G.menu = hs.chooser.new(function(choice)
@@ -566,17 +567,16 @@ G.menu = hs.chooser.new(function(choice)
       if not choice then return end
       if choice.id == 'pair' then G.choose(origin); return end
       if choice.id == 'separate' then G.separate(origin); return end
-      local commands = {zoom='fullscreen', tiles='layout tiles', stack='layout accordion',
-        balance='balance-sizes', float='layout floating tiling'}
+      local commands = {zoom={'fullscreen'}, tiles={'layout','h_tiles'}, stack={'layout','v_accordion'},
+        balance={'balance-sizes'}, float={'layout','floating','tiling'}}
       if choice.id == 'reset' then
         if hs.dialog.blockAlert('Reset space ' .. origin.workspace .. '?', 'Remove all split groups in this space? Other spaces and floating windows are unchanged.', 'Reset', 'Cancel') ~= 'Reset' then return end
         run({'flatten-workspace-tree', '--workspace', origin.workspace}, function()
           run({'layout', '--workspace', origin.workspace, '--root', 'v_accordion'})
         end)
       elseif commands[choice.id] then
-        -- origin is restored before invoking an existing AeroSpace-owned action.
-        local keys = {zoom='alt-f',tiles='alt-slash',stack='alt-shift-slash',balance='alt-shift-equal',float='alt-shift-space'}
-        run({'trigger-binding', keys[choice.id], '--mode', 'main'})
+        -- Semantic commands stay correct when a user remaps AeroSpace shortcuts.
+        run(commands[choice.id])
       end
     end)
   end)
@@ -592,9 +592,9 @@ local previousChooserCallback = hs.chooser.globalCallback
 hs.chooser.globalCallback = function(chooser, event)
   if chooser ~= G.chooser and chooser ~= G.menu and previousChooserCallback then previousChooserCallback(chooser, event) end
 end
-G.pairKey = hs.hotkey.bind({'alt'}, 'p', function() G.choose() end)
-G.separateKey = hs.hotkey.bind({'alt','shift'}, 'p', function() G.separate() end)
-G.menuKey = hs.hotkey.bind({'alt'}, 'g', G.show)
+G.pairKey = U.bind('pair', function() G.choose() end)
+G.separateKey = U.bind('separate', function() G.separate() end)
+G.menuKey = U.bind('layout_menu', G.show)
 assert(G.pairKey and G.pairKey.enabled and G.separateKey and G.separateKey.enabled and G.menuKey and G.menuKey.enabled,
   'Hangar layout shortcuts could not be registered')
 G.focus = focusOrigin

@@ -21,7 +21,7 @@ import tempfile
 import time
 import tomllib
 
-VERSION = '2026.10.04.2'
+VERSION = '2026.10.04.3'
 USER_DIR = Path.home()
 # Stable storage namespace shared with existing LeanMac installations.
 STATE = USER_DIR / 'Library/Application Support/LeanMac'
@@ -29,7 +29,7 @@ CONFIG = USER_DIR / '.aerospace.toml'
 HS_DIR = USER_DIR / '.hammerspoon'
 LUA_FILES = ('leanmac.lua', 'window-picker.lua', 'window-snap.lua', 'spaces-sync.lua',
              'mx-buttons.lua', 'leanmac-runtime.lua', 'leanmac-health.lua', 'leanmac-palette.lua', 'window-groups.lua',
-             'window-links.lua', 'workspace-overview.lua', 'picker-panel.lua')
+             'window-links.lua', 'workspace-overview.lua', 'picker-panel.lua', 'hangar-config.lua')
 HS_APP = Path('/Applications/Hammerspoon.app')
 HS = str(HS_APP / 'Contents/Frameworks/hs/hs')
 AERO = '/opt/homebrew/bin/aerospace' if Path('/opt/homebrew/bin/aerospace').exists() else '/usr/local/bin/aerospace'
@@ -76,6 +76,176 @@ def selected_profile():
     return profile
 
 
+# Portable desired configuration is separate from the activated runtime and backups.
+DEFAULT_HOTKEYS = {
+    'terminal': 'ctrl-alt-cmd-return', 'browser': 'ctrl-alt-cmd-b', 'finder': 'ctrl-alt-cmd-e',
+    'menu_bar': 'ctrl-alt-cmd-m', 'menu_search': 'ctrl-alt-cmd-p', 'reload': 'ctrl-alt-cmd-r',
+    'management_toggle': 'ctrl-alt-cmd-escape', 'picker_search': 'ctrl-alt-cmd-w',
+    'snap_left': 'alt-left', 'snap_right': 'alt-right', 'snap_up': 'alt-up', 'snap_down': 'alt-down',
+    'pair': 'alt-p', 'separate': 'alt-shift-p', 'layout_menu': 'alt-g', 'overview': 'alt-o',
+    'palette': 'ctrl-alt-cmd-slash', 'gather': 'ctrl-alt-cmd-s', 'mx_picker': 'f17',
+}
+PORTABLE_APPS = {'terminal': 'Terminal', 'browser': 'Safari', 'finder': 'Finder'}
+LEGACY_APPS = {'terminal': 'Ghostty', 'browser': 'Brave Browser', 'finder': 'Finder'}
+MODIFIERS = ('ctrl', 'alt', 'cmd', 'shift')
+KEY_NAMES = {name: name for name in ('return', 'tab', 'space', 'escape', 'left', 'right', 'up', 'down')}
+KEY_NAMES.update({'slash': '/', 'comma': ',', 'period': '.', 'backtick': '`', 'minus': '-', 'equal': '='})
+KEY_NAMES.update({key: key for key in 'abcdefghijklmnopqrstuvwxyz0123456789'})
+KEY_NAMES.update({f'f{i}': f'f{i}' for i in range(1, 21)})
+
+
+def xdg_config_root():
+    root = Path(os.environ.get('XDG_CONFIG_HOME') or USER_DIR / '.config')
+    if not root.is_absolute():
+        raise ValueError('XDG_CONFIG_HOME must be an absolute path')
+    return Path(os.path.abspath(root))
+
+
+def user_config_dir():
+    return xdg_config_root() / 'hangar'
+
+
+def parse_hotkey(chord):
+    if not isinstance(chord, str):
+        raise ValueError('Hotkeys must be chord strings, such as ctrl-alt-cmd-return')
+    parts = chord.lower().split('-')
+    modifiers, key = parts[:-1], parts[-1]
+    if key not in KEY_NAMES or len(set(modifiers)) != len(modifiers) or any(m not in MODIFIERS for m in modifiers):
+        raise ValueError(f'Unsupported hotkey: {chord}')
+    canonical = '-'.join([m for m in MODIFIERS if m in modifiers] + [key])
+    return canonical, {'mods': [m for m in MODIFIERS if m in modifiers], 'key': KEY_NAMES[key]}
+
+
+def read_user_settings(path):
+    if path.stat().st_size > 64 * 1024:
+        raise ValueError(f'Settings exceed 64 KiB: {path}')
+    values = tomllib.loads(path.read_text())
+    unknown = values.keys() - {'schema', 'profile', 'apps', 'hotkeys'}
+    if unknown:
+        raise ValueError(f'{path.name}: unknown settings: {", ".join(sorted(unknown))}')
+    if 'schema' in values and (type(values['schema']) is not int or values['schema'] != 1):
+        raise ValueError(f'{path.name}: schema must be integer 1')
+    if 'profile' in values and (not isinstance(values['profile'], str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]*', values['profile'])):
+        raise ValueError(f'{path.name}: invalid profile')
+    for section, allowed in [('apps', PORTABLE_APPS), ('hotkeys', DEFAULT_HOTKEYS)]:
+        if section not in values:
+            continue
+        entries = values[section]
+        if not isinstance(entries, dict) or entries.keys() - allowed.keys():
+            raise ValueError(f'{path.name}: unknown or invalid {section} settings')
+        for key, value in entries.items():
+            if not isinstance(value, str) or not value.strip() or len(value) > 160 or any(ord(c) < 32 for c in value):
+                raise ValueError(f'{path.name}: {section}.{key} must be a nonempty string without control characters')
+            if section == 'hotkeys':
+                parse_hotkey(value)
+    return values
+
+
+def resolve_user_config(kit=None):
+    directory = user_config_dir()
+    sources = {'settings': None, 'local': None, 'aerospace': None, 'profile': 'legacy-selector' if (STATE / 'aerospace-profile').exists() else 'default'}
+    merged = {}
+    for name, source_key in [('settings.toml', 'settings'), ('settings.local.toml', 'local')]:
+        path = directory / name
+        if not path.exists() and not path.is_symlink():
+            continue
+        values = read_user_settings(path)
+        sources[source_key] = str(path)
+        for key, value in values.items():
+            if key in ('apps', 'hotkeys'):
+                merged.setdefault(key, {}).update(value)
+            else:
+                merged[key] = value
+            if key == 'profile':
+                sources['profile'] = str(path)
+    configured = sources['settings'] is not None or sources['local'] is not None
+    profile = merged['profile'] if 'profile' in merged else selected_profile()
+    apps = {**(PORTABLE_APPS if configured else LEGACY_APPS), **merged.get('apps', {})}
+    hotkeys = {**DEFAULT_HOTKEYS, **merged.get('hotkeys', {})}
+    seen = {'alt-tab': 'reserved picker cycling', 'alt-shift-tab': 'reserved reverse picker cycling'}
+    runtime_keys = {}
+    for action, chord in hotkeys.items():
+        canonical, runtime = parse_hotkey(chord)
+        if canonical in seen:
+            raise ValueError(f'Hotkey collision: {action} and {seen[canonical]} both use {canonical}')
+        seen[canonical], hotkeys[action], runtime_keys[action] = action, canonical, runtime
+    override = directory / 'aerospace.toml'
+    if override.exists() or override.is_symlink():
+        sources['aerospace'] = str(override)
+    elif kit is not None:
+        sources['aerospace'] = str(Path(kit).resolve() / 'config' / ('aerospace.toml' if profile == 'default' else f'aerospace-{profile}.toml'))
+    return {'schema': 1, 'profile': profile, 'apps': apps, 'hotkeys': hotkeys,
+            'sources': sources, 'legacy_defaults': not configured, 'runtime_hotkeys': runtime_keys}
+
+
+def validate_user_config(config):
+    source = config['sources']['aerospace']
+    if source is None:
+        raise RuntimeError('No AeroSpace source available. Pass --kit /path/to/Hangar or provide ~/.config/hangar/aerospace.toml')
+    candidate = Path(source)
+    if not candidate.is_file():
+        raise RuntimeError(f'Selected profile does not exist: {candidate}')
+    aerospace = validate_config(candidate)
+    owned = {parse_hotkey(chord)[0]: action for action, chord in config['hotkeys'].items()}
+    owned.update({'alt-tab': 'picker cycling', 'alt-shift-tab': 'reverse picker cycling'})
+    # Compare ordinary AeroSpace chords in every mode; unsupported AeroSpace syntax is
+    # validated by AeroSpace during activation, never guessed by this layer.
+    for mode, body in aerospace.get('mode', {}).items():
+        for chord in body.get('binding', {}):
+            try:
+                parts = chord.split('-')
+                parts[-1] = {'enter': 'return', 'esc': 'escape'}.get(parts[-1], parts[-1])
+                canonical, _ = parse_hotkey('-'.join(parts))
+            except ValueError:
+                continue
+            if canonical in owned:
+                raise ValueError(f'Hotkey collision: AeroSpace {mode}:{chord} conflicts with Hangar {owned[canonical]}')
+    return aerospace
+
+
+def lua_literal(value):
+    if isinstance(value, str):
+        # Lua accepts quoted UTF-8 and these escapes; inputs have no control bytes.
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, dict):
+        return '{' + ','.join('[' + lua_literal(k) + ']=' + lua_literal(v) for k, v in value.items()) + '}'
+    if isinstance(value, list):
+        return '{' + ','.join(lua_literal(v) for v in value) + '}'
+    raise ValueError('Unsupported generated settings value')
+
+
+def render_runtime_settings(config):
+    return '-- Generated by Hangar; edit ~/.config/hangar/settings.toml and apply.\nreturn ' + lua_literal({'apps': config['apps'], 'hotkeys': config['runtime_hotkeys']}) + '\n'
+
+
+def init_user_config():
+    directory = user_config_dir()
+    # Neither source is overwritten; existing local-only settings are deliberate.
+    for name in ('settings.toml', 'settings.local.toml'):
+        if (directory / name).exists() or (directory / name).is_symlink():
+            raise RuntimeError(f'Configuration already exists: {directory / name}')
+    directory.mkdir(parents=True, exist_ok=True)
+    text = '# Hangar portable settings. No activation until config apply.\n'
+    text += '# Omit profile to retain the legacy selector; or use default / numbered-study.\nschema = 1\n\n[apps]\n'
+    text += '\n'.join(f'{key} = {json.dumps(value)}' for key, value in PORTABLE_APPS.items()) + '\n'
+    target = directory / 'settings.toml'
+    with target.open('x') as stream:
+        stream.write(text)
+    print(f'Created {target}. Review with hangar config show; validate with hangar config check.')
+
+
+def check_user_config(config):
+    validate_user_config(config)
+    if (HS_APP / 'Contents/Frameworks/LuaSkin.framework/LuaSkin').exists():
+        with tempfile.TemporaryDirectory(prefix='hangar-config-check-') as directory:
+            target = Path(directory) / 'hangar-settings.lua'
+            target.write_text(render_runtime_settings(config))
+            validate_lua([target])
+        print('Configuration valid: TOML, profile, shortcut ownership, generated Lua syntax. No activation.')
+    else:
+        print('Configuration valid: TOML, profile and shortcut ownership. Lua syntax check unavailable without Hammerspoon. No activation.')
+
+
 def json_result(result):
     code, out, err = result
     if code:
@@ -89,8 +259,8 @@ def doctor():
     def add(name, status, message):
         report['checks'].append({'name': name, 'status': status, 'message': message})
     try:
-        report['profile'] = selected_profile()
-        add('profile', 'ok', f"Local profile: {report['profile']}")
+        report['profile'] = resolve_user_config(default_kit())['profile']
+        add('profile', 'ok', f"Configured source profile: {report['profile']}")
     except (OSError, ValueError) as e:
         add('profile', 'fail', str(e))
     config = {}
@@ -99,7 +269,7 @@ def doctor():
         add('config-file', 'ok', f'Config parses: {CONFIG}')
     except (OSError, ValueError) as e:
         add('config-file', 'fail', f'Config cannot be read/parsed: {e}')
-    xdg = Path(os.environ.get('XDG_CONFIG_HOME', USER_DIR / '.config')) / 'aerospace/aerospace.toml'
+    xdg = xdg_config_root() / 'aerospace/aerospace.toml'
     if xdg.exists():
         add('config-location', 'fail', f'Second AeroSpace config exists: {xdg}')
     jobs = {
@@ -154,7 +324,7 @@ def doctor():
         for key, message in [('accessibility', 'Hammerspoon Accessibility'), ('loaded', 'Hangar modules loaded'),
                              ('pickerSubscriber', 'Window picker event subscription'), ('pickerForward', 'Option+Tab'),
                              ('pickerBackward', 'Option+Shift+Tab'), ('pickerSearch', 'Search picker'),
-                             ('snapKeys', 'Option+arrow snapping'), ('snapMouse', 'Drag snapping'),
+                             ('snapKeys', 'Configured snapping shortcuts'), ('snapMouse', 'Drag snapping'),
                              ('mxPicker', 'MX picker button'), ('paletteKey', 'Command palette shortcut'),
                              ('healthWatcher', 'Wake/unlock watcher'), ('groupKeys', 'Pair/separate/layout shortcuts'),
                              ('overviewKey', 'Workspace overview shortcut')]:
@@ -431,14 +601,16 @@ def install(kit, check_only=False, extras=False):
     if kit is None:
         raise RuntimeError('No source kit found. Extract a release and pass install --kit /path/to/Hangar')
     kit = kit.resolve()
-    profile = selected_profile()
-    candidate = kit / 'config' / ('aerospace.toml' if profile == 'default' else f'aerospace-{profile}.toml')
-    if not candidate.is_file():
-        raise RuntimeError(f'Selected profile does not exist: {candidate}')
+    user_config = resolve_user_config(kit)
+    profile = user_config['profile']
+    validate_user_config(user_config)
+    candidate = Path(user_config['sources']['aerospace'])
     # Staging does not write locks or state into the user's installation.
     with (contextlib.nullcontext() if check_only else install_lock()), tempfile.TemporaryDirectory(prefix='leanmac-stage-') as temp:
         stage = Path(temp)
         staged = {}
+        atomic_bytes(stage / 'hangar-settings.lua', render_runtime_settings(user_config).encode())
+        staged[HS_DIR / 'hangar-settings.lua'] = stage / 'hangar-settings.lua'
         for name in LUA_FILES:
             shutil.copy2(kit / 'config' / name, stage / name)
             staged[HS_DIR / name] = stage / name
@@ -454,7 +626,7 @@ def install(kit, check_only=False, extras=False):
         for config_file in (kit / 'config').glob('aerospace*.toml'):
             validate_config(config_file)
         expected = validate_config(stage / 'aerospace.toml')
-        validate_lua([stage / name for name in LUA_FILES] + [stage / 'init.lua'])
+        validate_lua([stage / name for name in LUA_FILES] + [stage / 'init.lua', stage / 'hangar-settings.lua'])
         helper = stage / 'leanmac-window-focus'
         run(['/usr/bin/xcrun', 'swiftc', '-module-cache-path', stage / 'SwiftModuleCache',
              kit / 'config/leanmac-window-focus.swift', '-O', '-o', helper], timeout=120, required=True)
@@ -504,7 +676,7 @@ def install(kit, check_only=False, extras=False):
         run(['/bin/bash', '-n', kit / 'bin/hangar'], required=True)
         run(['/bin/bash', '-n', kit / 'bin/leanmac'], required=True)
         run(['/bin/bash', '-n', kit / 'install.command'], required=True)
-        print(f'Staging passed: {profile}, {len(LUA_FILES) + 1} Lua files, TOML profiles, compiled/signed focus helper.', flush=True)
+        print(f'Staging passed: {profile}, {len(LUA_FILES) + 2} Lua files, TOML profiles, compiled/signed focus helper.', flush=True)
         if check_only:
             print('No live config replaced. AeroSpace semantic validation runs during guarded activation.')
             return
@@ -514,13 +686,14 @@ def install(kit, check_only=False, extras=False):
         for old in (STATE / 'backup').glob('*/manifest.json'):
             if json.loads(old.read_text()).get('status') in ('applying', 'rollback-failed'):
                 raise RuntimeError(f'Unfinished transaction: {old.parent.name}. Run hangar rollback {old.parent.name}')
-        xdg = Path(os.environ.get('XDG_CONFIG_HOME', USER_DIR / '.config')) / 'aerospace/aerospace.toml'
+        xdg = xdg_config_root() / 'aerospace/aerospace.toml'
         paths = list(staged)
         if xdg.exists() or xdg.is_symlink():
             paths.append(xdg)
         backup = new_backup()
         manifest = {'schema': 1, 'version': VERSION, 'status': 'prepared', 'profile': profile,
-                    'files': snapshot_files(backup, paths), 'kit': str(kit)}
+                    'files': snapshot_files(backup, paths), 'kit': str(kit),
+                    'xdgAerospace': str(xdg) if xdg in paths else None}
         changes = preference_changes() if extras else {}
         manifest['preferences'], manifest['agents'] = {}, {}
         for domain, values in changes.items():
@@ -579,7 +752,7 @@ def install(kit, check_only=False, extras=False):
             manifest['status'] = 'committed'
             save_manifest(backup, manifest)
             atomic_bytes(STATE / 'last-install', backup.name.encode())
-            print(f'Installed and verified. Backup: {backup}\nPalette: Control+Option+Command+/\nCheck: hangar doctor', flush=True)
+            print(f'Installed and verified. Backup: {backup}\nPalette: {user_config["hotkeys"]["palette"]}\nCheck: hangar doctor', flush=True)
         except BaseException as e:
             manifest['error'] = str(e)
             try:
@@ -607,7 +780,7 @@ def rollback(name):
         manifest = json.loads((backup / 'manifest.json').read_text())
         if manifest.get('schema') != 1:
             raise RuntimeError('This backup predates transactional installs; follow README rollback instructions')
-        allowed = {USER_DIR / '.local/bin/hangar'} | {HS_DIR / n for n in LUA_FILES + ('init.lua', 'workspace-overview.html')} | {CONFIG,
+        allowed = {USER_DIR / '.local/bin/hangar'} | {HS_DIR / n for n in LUA_FILES + ('init.lua', 'workspace-overview.html', 'hangar-settings.lua')} | {CONFIG,
             HS_DIR / 'bin/leanmac-window-focus', HS_DIR / 'bin/leanmac-overview',
             HS_DIR / 'bin/LeanMacOverview.app/Contents/Info.plist',
             HS_DIR / 'bin/LeanMacOverview.app/Contents/MacOS/leanmac-overview',
@@ -618,12 +791,23 @@ def rollback(name):
             USER_DIR / '.local/lib/leanmac/leanmac.py',
             USER_DIR / 'Library/LaunchAgents/local.leanmac.Shottr.plist',
             USER_DIR / 'Library/LaunchAgents/local.leanmac.Thaw.plist',
-            Path(os.environ.get('XDG_CONFIG_HOME', USER_DIR / '.config')) / 'aerospace/aerospace.toml'}
+            USER_DIR / '.config/aerospace/aerospace.toml'}
+        # New backups retain the exact duplicate location across XDG changes.
+        # Legacy backups did not record it: accept their saved absolute AeroSpace
+        # target with the same narrow filename shape, including external XDG roots.
+        duplicates = ([manifest['xdgAerospace']] if manifest.get('xdgAerospace') else
+                      [i['path'] for i in manifest['files'] if i['path'].endswith('/aerospace/aerospace.toml')])
+        for saved in duplicates:
+            target = Path(saved)
+            if not target.is_absolute() or '..' in target.parts or target.parts[-2:] != ('aerospace', 'aerospace.toml'):
+                raise RuntimeError('Backup contains an invalid XDG AeroSpace target')
+            allowed.add(target)
         for item in manifest['files']:
             if Path(item['path']) not in allowed or not re.fullmatch(r'files/\d+', item['saved']):
                 raise RuntimeError('Backup contains an unexpected target')
         rescue = new_backup('before-rollback')
-        rescue_manifest = {'schema': 1, 'status': 'saved', 'files': snapshot_files(rescue, [Path(i['path']) for i in manifest['files']])}
+        rescue_manifest = {'schema': 1, 'status': 'saved', 'files': snapshot_files(rescue, [Path(i['path']) for i in manifest['files']]),
+                           'xdgAerospace': str(duplicates[0]) if duplicates else None}
         rescue_manifest['preferences'], rescue_manifest['agents'] = {}, {}
         for domain, keys in manifest.get('preferences', {}).items():
             before = preference_domain(domain)
@@ -666,8 +850,29 @@ def main():
     r.add_argument('backup', nargs='?', default='last')
     sub.add_parser('backups', help='List transactional backup names and states')
     sub.add_parser('palette', help='Open the command palette')
+    c = sub.add_parser('config', help='Manage desired portable configuration; activation is explicit')
+    actions = c.add_subparsers(dest='config_command', required=True)
+    actions.add_parser('init', help='Create portable defaults without overwriting existing settings')
+    for action in ('show', 'check', 'apply'):
+        command = actions.add_parser(action)
+        command.add_argument('--kit', type=Path, default=default_kit())
+        if action == 'show':
+            command.add_argument('--json', action='store_true')
     args = parser.parse_args()
     try:
+        if args.command == 'config':
+            if args.config_command == 'init':
+                init_user_config()
+            elif args.config_command == 'apply':
+                install(args.kit)
+            else:
+                config = resolve_user_config(args.kit)
+                if args.config_command == 'check':
+                    check_user_config(config)
+                else:
+                    config.pop('runtime_hotkeys')
+                    print(json.dumps(config, ensure_ascii=False, indent=None if args.json else 2))
+            return 0
         if args.command == 'doctor':
             report = doctor()
             print_report(report, args.json)

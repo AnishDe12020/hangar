@@ -1,3 +1,4 @@
+local U = require('hangar-config')
 -- Float-and-place snap. AeroSpace keeps tiling until we explicitly float.
 local S = {}
 local cli = hs.fs.attributes('/opt/homebrew/bin/aerospace') and '/opt/homebrew/bin/aerospace' or '/usr/local/bin/aerospace'
@@ -50,10 +51,10 @@ end
 local function focused(zone)
   return function() S.apply(hs.window.focusedWindow(), zone) end
 end
-S.left = hs.hotkey.bind({'alt'}, 'left', focused('left'))
-S.right = hs.hotkey.bind({'alt'}, 'right', focused('right'))
-S.up = hs.hotkey.bind({'alt'}, 'up', focused('up'))
-S.down = hs.hotkey.bind({'alt'}, 'down', focused('down'))
+S.left = U.bind('snap_left', focused('left'))
+S.right = U.bind('snap_right', focused('right'))
+S.up = U.bind('snap_up', focused('up'))
+S.down = U.bind('snap_down', focused('down'))
 
 local drag, preview = {}, nil
 local function hidePreview()

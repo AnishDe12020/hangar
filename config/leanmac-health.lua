@@ -1,3 +1,4 @@
+local U = require('hangar-config')
 local R = require('leanmac-runtime')
 local H = {version = 1, locked = false, runs = 0}
 local function enabled(key) return key ~= nil and key.enabled == true end
@@ -64,7 +65,7 @@ function H.check(reason, manual, followup)
       H.retry = hs.timer.doAfter(5, function() H.check(reason, false, true) end)
     elseif #warnings > 0 then
       if manual or signature ~= H.lastWarning or hs.timer.secondsSinceEpoch() - (H.warnedAt or 0) > 300 then
-        hs.alert.show('Hangar · ' .. table.concat(warnings, '\n') .. '\n⌃⌥⌘/ → Diagnose for details', 8)
+        hs.alert.show('Hangar · ' .. table.concat(warnings, '\n') .. '\n' .. U.label('palette') .. ' → Diagnose for details', 8)
         H.lastWarning, H.warnedAt = signature, hs.timer.secondsSinceEpoch()
       end
     else

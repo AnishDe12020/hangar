@@ -1,3 +1,4 @@
+local U = require('hangar-config')
 local R = require('leanmac-runtime')
 local C = {choices = {}, actions = {}}
 local focusHelper = hs.configdir .. '/bin/leanmac-window-focus'
@@ -74,19 +75,19 @@ function C.refresh()
     if code ~= 0 or not ok or type(bindings) ~= 'table' then return end
     local choices, actions = {}, {}
     add(choices, actions, 'doctor', 'Diagnose Hangar', 'Secure Input · services · displays · shortcuts', C.diagnose)
-    add(choices, actions, 'windows', 'Search windows', '⌃⌥⌘W · exact window picker', function() leanmac.picker.start(false, false) end)
-    add(choices, actions, 'layouts', 'Window layouts', '⌥G · split pairs, zoom, resize and reset', function() leanmac.groups.show() end)
-    add(choices, actions, 'overview', 'Workspace overview', '⌥O · drag windows and linked pairs between spaces', function() leanmac.overview.show() end)
-    add(choices, actions, 'pair', 'Pair with another window…', '⌥P · same-space window chooser', function() leanmac.groups.choose() end)
-    add(choices, actions, 'separate', 'Separate this window', '⌥⇧P · return to a standalone view', function() leanmac.groups.separate() end)
-    add(choices, actions, 'hs-reload', 'Reload Hammerspoon', '⌃⌥⌘R · reload utility config', hs.reload)
-    add(choices, actions, 'gather', 'Gather windows from extra macOS Desktops…', '⌃⌥⌘S · moves windows; does not delete Desktops', function()
+    add(choices, actions, 'windows', 'Search windows', U.label('picker_search') .. ' · exact window picker', function() leanmac.picker.start(false, false) end)
+    add(choices, actions, 'layouts', 'Window layouts', U.label('layout_menu') .. ' · split pairs, zoom, resize and reset', function() leanmac.groups.show() end)
+    add(choices, actions, 'overview', 'Workspace overview', U.label('overview') .. ' · drag windows and linked pairs between spaces', function() leanmac.overview.show() end)
+    add(choices, actions, 'pair', 'Pair with another window…', U.label('pair') .. ' · same-space window chooser', function() leanmac.groups.choose() end)
+    add(choices, actions, 'separate', 'Separate this window', U.label('separate') .. ' · return to a standalone view', function() leanmac.groups.separate() end)
+    add(choices, actions, 'hs-reload', 'Reload Hammerspoon', U.label('reload') .. ' · reload utility config', hs.reload)
+    add(choices, actions, 'gather', 'Gather windows from extra macOS Desktops…', U.label('gather') .. ' · moves windows; does not delete Desktops', function()
       leanmac.spaces.collapseNow()
     end)
     for _, zone in ipairs({'left', 'right', 'up', 'down'}) do
       local z = zone
       local names = {left = 'Snap left half', right = 'Snap right half', up = 'Snap full display', down = 'Restore pre-snap frame'}
-      add(choices, actions, 'snap-' .. z, names[z], '⌥ ' .. z .. ' arrow', function() leanmac.snap.apply(hs.window.focusedWindow(), z) end)
+      add(choices, actions, 'snap-' .. z, names[z], U.label('snap_' .. z), function() leanmac.snap.apply(hs.window.focusedWindow(), z) end)
     end
     local keys = {}
     for key in pairs(bindings) do table.insert(keys, key) end
@@ -138,7 +139,7 @@ function C.show()
   C.chooser:query(''):choices(C.choices):show()
   C.refresh() -- refresh the next opening without moving rows under the user
 end
-C.hotkey = hs.hotkey.bind({'ctrl', 'alt', 'cmd'}, '/', C.show)
+C.hotkey = U.bind('palette', C.show)
 assert(C.hotkey and C.hotkey.enabled, 'Hangar palette shortcut could not be registered')
 C.refresh()
 return C

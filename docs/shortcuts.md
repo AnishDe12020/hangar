@@ -1,6 +1,6 @@
 # Shortcut reference
 
-Option = ⌥, Shift = ⇧, Control = ⌃, Command = ⌘. The command palette (⌃⌥⌘/) shows the active profile's bindings.
+Option = ⌥, Shift = ⇧, Control = ⌃, Command = ⌘. These are default keys. The command palette shows active bindings; `hangar config show` lists desired configured chords.
 
 | Shortcut | Action |
 | --- | --- |
@@ -25,7 +25,7 @@ Option = ⌥, Shift = ⇧, Control = ⌃, Command = ⌘. The command palette (�
 | ⌃⌥⌘R | Reload Hammerspoon |
 | ⌃⌥⌘Escape | Toggle AeroSpace window management |
 | ⌃⌥⌘S | Confirm gathering windows from extra native Desktops |
-| ⌃⌥⌘Return / B / E | Open Ghostty / Brave / Finder (apps must be installed) |
+| ⌃⌥⌘Return / B / E | Open configured terminal / browser / Finder |
 | ⌃⌥⌘M / P | Toggle Thaw bar / search menu bar items |
 | F17 / F18 / F19 | Picker / previous workspace / next workspace |
 

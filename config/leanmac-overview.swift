@@ -162,7 +162,7 @@ final class Board: NSObject, NSWindowDelegate, NSMenuDelegate {
         root.subviews.forEach{$0.removeFromSuperview()};actions=[]
         let width=root.bounds.width,height=root.bounds.height
         let heading=label("Spaces",size:22);heading.font = .systemFont(ofSize:22,weight:.semibold);heading.frame=NSRect(x:24,y:12,width:150,height:30);root.addSubview(heading)
-        let hint=label("⌥O   ·   Drag to move or pair   ·   Right-click for actions",size:11,color:.secondaryLabelColor);hint.frame=NSRect(x:180,y:23,width:width-310,height:20);root.addSubview(hint)
+        let hint=label("Drag to move or pair   ·   Right-click for actions",size:11,color:.secondaryLabelColor);hint.frame=NSRect(x:180,y:23,width:width-310,height:20);root.addSubview(hint)
         root.addSubview(button("Refresh",frame:NSRect(x:width-98,y:13,width:78,height:28)){self.send("refresh")})
         let n=max(1,spaces.count),gap:CGFloat=12,margin:CGFloat=20
         let col=(width-margin*2-gap*CGFloat(n-1))/CGFloat(n)

@@ -23,6 +23,7 @@ local linkEnv={hs={settings={get=function()return {}end,set=function()end}}}
 setmetatable(linkEnv,{__index=_G})
 local L=assert(loadfile(KIT..'/config/window-links.lua','t',linkEnv))()
 env.require=function(name) if name=='window-links' then return L end; return runtime end
+HANGAR_TEST_CONFIGURE(env)
 local B=assert(loadfile(KIT..'/config/workspace-overview.lua','t',env))()
 local tests=0
 local function check(value)assert(value,'check at line '..debug.getinfo(2,'l').currentline);tests=tests+1 end

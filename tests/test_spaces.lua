@@ -18,9 +18,10 @@ local env = {hs = {
   },
   dialog = {blockAlert=function() prompts=prompts+1; return answer end},
   alert = {show=function() end},
-  hotkey = {bind=function(_,_,callback) action=callback; return {} end},
+  hotkey = {bind=function(_,_,callback) action=callback; return {enabled=true} end},
 }}
 setmetatable(env, {__index=_G})
+HANGAR_TEST_CONFIGURE(env)
 local S=assert(loadfile(KIT .. '/config/spaces-sync.lua', 't', env))()
 assert(preferenceWrites==0 and moves==0 and reloads==0, 'module load must not change preferences or windows')
 action()

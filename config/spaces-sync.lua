@@ -1,3 +1,4 @@
+local U = require('hangar-config')
 -- AeroSpace hides inactive workspaces off-screen. Extra macOS Spaces desync that.
 -- Gathering is an explicit, confirmed action; loading this module is read-only.
 local M = {}
@@ -75,7 +76,7 @@ end
 function M.report()
   local n = extraCount()
   if n > 0 then
-    hs.alert.show(n .. ' extra macOS Desktop(s). ⌃⌥⌘S gathers windows onto this one; delete extras in Mission Control')
+    hs.alert.show(n .. ' extra macOS Desktop(s). ' .. U.label('gather') .. ' gathers windows onto this one; delete extras in Mission Control')
   end
   return n
 end
@@ -86,5 +87,5 @@ function M.collapseNow()
   if M.collapse() then hs.alert.show('Moved windows onto this Desktop. Delete leftover Desktops in Mission Control') else hs.alert.show('Could not gather windows') end
 end
 -- Do not watch Space changes: Mission Control APIs can hitch WindowServer.
-M.hotkey = hs.hotkey.bind({'ctrl', 'alt', 'cmd'}, 's', M.collapseNow)
+M.hotkey = U.bind('gather', M.collapseNow)
 return M

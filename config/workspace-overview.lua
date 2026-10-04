@@ -1,3 +1,4 @@
+local U = require('hangar-config')
 -- On-demand AppKit panel. JSON-lines over local pipes; no server or WebKit.
 local R = require('leanmac-runtime')
 local links = require('window-links')
@@ -348,6 +349,6 @@ hs.shutdownCallback=function()
   if B.task then B.task:terminate() end
   if previousShutdown then previousShutdown() end
 end
-B.hotkey=hs.hotkey.bind({'alt'},'o',B.show)
+B.hotkey=U.bind('overview',B.show)
 assert(B.hotkey and B.hotkey.enabled,'Hangar overview shortcut could not be registered')
 return B
