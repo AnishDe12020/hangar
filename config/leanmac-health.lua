@@ -49,7 +49,7 @@ function H.check(reason, manual, followup)
     local ok, result = pcall(hs.json.decode, out)
     if not ok or type(result) ~= 'table' or not result.checks then
       H.lastError = err ~= '' and err or 'Doctor returned no report'
-      if not H.locked then hs.alert.show('LeanMac health check unavailable. Run leanmac doctor in Terminal.') end
+      if not H.locked then hs.alert.show('Hangar health check unavailable. Run hangar doctor in Terminal.') end
       return
     end
     H.lastReport = result
@@ -64,12 +64,12 @@ function H.check(reason, manual, followup)
       H.retry = hs.timer.doAfter(5, function() H.check(reason, false, true) end)
     elseif #warnings > 0 then
       if manual or signature ~= H.lastWarning or hs.timer.secondsSinceEpoch() - (H.warnedAt or 0) > 300 then
-        hs.alert.show('LeanMac · ' .. table.concat(warnings, '\n') .. '\n⌃⌥⌘/ → Diagnose for details', 8)
+        hs.alert.show('Hangar · ' .. table.concat(warnings, '\n') .. '\n⌃⌥⌘/ → Diagnose for details', 8)
         H.lastWarning, H.warnedAt = signature, hs.timer.secondsSinceEpoch()
       end
     else
       H.lastWarning = nil
-      if manual then hs.alert.show('LeanMac checks passed') end
+      if manual then hs.alert.show('Hangar checks passed') end
     end
     if H.pending then
       local pending = H.pending; H.pending = nil

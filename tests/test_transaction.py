@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -165,6 +166,48 @@ class Transactions(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), b'old config bytes\n')
         self.assertFalse((self.user / '.local/bin/leanmac').exists())
         self.assertTrue(any(m['status'] == 'saved' for m in self.manifests()))
+
+    def test_upgrade_reuses_legacy_profile_and_restores_old_cli(self):
+        self.state.mkdir(parents=True)
+        (self.state / 'aerospace-profile').write_text('numbered-study\n')
+        old_cli = self.user / '.local/bin/leanmac'
+        old_core = self.user / '.local/lib/leanmac/leanmac.py'
+        old_cli.parent.mkdir(parents=True)
+        old_core.parent.mkdir(parents=True)
+        old_cli.write_text('#!/bin/bash\necho legacy\n')
+        old_cli.chmod(0o755)
+        old_core.write_text('# legacy core\n')
+        self.init.write_text('userSetting = 42\nleanmac = require("leanmac")\n')
+        legacy_backup = lm.new_backup('legacy')
+        lm.save_manifest(legacy_backup, {'schema': 1, 'status': 'committed',
+            'files': lm.snapshot_files(legacy_backup, [self.config, old_cli, old_core])})
+        original_manifest = (legacy_backup / 'manifest.json').read_bytes()
+        lm.install(self.kit)
+        installed_backup = (self.state / 'last-install').read_text()
+        self.assertEqual((legacy_backup / 'manifest.json').read_bytes(), original_manifest)
+        self.assertEqual(lm.selected_profile(), 'numbered-study')
+        self.assertEqual(self.init.read_text().count('require("leanmac")'), 1)
+        for command in ['hangar', 'leanmac']:
+            binary = self.user / '.local/bin' / command
+            self.assertEqual(binary.stat().st_mode & 0o777, 0o755)
+            result = subprocess.run([str(binary), '--help'], capture_output=True, text=True, check=True)
+            self.assertIn('usage: hangar', result.stdout)
+            self.assertIn('Hangar diagnostics', result.stdout)
+        lm.rollback(installed_backup)
+        self.assertEqual(old_cli.read_text(), '#!/bin/bash\necho legacy\n')
+        self.assertEqual(old_core.read_text(), '# legacy core\n')
+        self.assertFalse((self.user / '.local/bin/hangar').exists())
+        self.assertEqual(lm.selected_profile(), 'numbered-study')
+        lm.rollback(legacy_backup.name)  # old schema/targets remain accepted
+        self.assertEqual(self.config.read_bytes(), b'old config bytes\n')
+
+    def test_legacy_manifest_still_discovers_source_kit(self):
+        self.state.mkdir(parents=True)
+        backup = lm.new_backup('legacy')
+        lm.save_manifest(backup, {'schema': 1, 'kit': str(self.kit)})
+        (self.state / 'last-install').write_text(backup.name)
+        with patch.object(lm, '__file__', str(self.user / '.local/lib/leanmac/leanmac.py')):
+            self.assertEqual(lm.default_kit(), self.kit)
 
     def test_profile_choice_is_local(self):
         self.state.mkdir(parents=True)

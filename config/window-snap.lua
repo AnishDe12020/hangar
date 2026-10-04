@@ -6,7 +6,7 @@ local function aero(args, cb)
   local task
   task = hs.task.new(cli, function(code, out, err)
     tasks[task] = nil
-    if code ~= 0 then hs.printf('LeanMac snap: %s', err or out) end
+    if code ~= 0 then hs.printf('Hangar snap: %s', err or out) end
     if cb then cb(code == 0) end
   end, args)
   if task then tasks[task] = true; task:start() end

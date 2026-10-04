@@ -20,7 +20,7 @@ local function succeed(message)
 end
 local function run(args, done)
   R.run(R.aerospace, args, function(code, out, err)
-    if code ~= 0 then fail('Command failed; layout may be partly changed'); hs.printf('LeanMac layouts: %s', err); return end
+    if code ~= 0 then fail('Command failed; layout may be partly changed'); hs.printf('Hangar layouts: %s', err); return end
     if done then done(out) end
   end)
 end
@@ -296,7 +296,7 @@ local function commandAt(ctx, item, workspace, args, done)
   requireLocation(ctx, item, workspace, function()
     execute(args, function(ok, _, err)
       if not ok then
-        hs.printf('LeanMac layouts: %s', err or '')
+        hs.printf('Hangar layouts: %s', err or '')
         abort(ctx, 'Command failed during layout recovery'); return
       end
       done()
@@ -308,7 +308,7 @@ local function moveLeaf(ctx, item, from, destination, done)
     ctx.mutated = true
     execute({'move-node-to-workspace', '--window-id', tostring(item.id), destination}, function(ok, _, err)
       if not ok then
-        hs.printf('LeanMac layouts: %s', err or '')
+        hs.printf('Hangar layouts: %s', err or '')
         abort(ctx, 'Could not move a selected window'); return
       end
       requireLocation(ctx, item, destination, done)
@@ -596,6 +596,6 @@ G.pairKey = hs.hotkey.bind({'alt'}, 'p', function() G.choose() end)
 G.separateKey = hs.hotkey.bind({'alt','shift'}, 'p', function() G.separate() end)
 G.menuKey = hs.hotkey.bind({'alt'}, 'g', G.show)
 assert(G.pairKey and G.pairKey.enabled and G.separateKey and G.separateKey.enabled and G.menuKey and G.menuKey.enabled,
-  'LeanMac layout shortcuts could not be registered')
+  'Hangar layout shortcuts could not be registered')
 G.focus = focusOrigin
 return G

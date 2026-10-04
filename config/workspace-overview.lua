@@ -349,5 +349,5 @@ hs.shutdownCallback=function()
   if previousShutdown then previousShutdown() end
 end
 B.hotkey=hs.hotkey.bind({'alt'},'o',B.show)
-assert(B.hotkey and B.hotkey.enabled,'LeanMac overview shortcut could not be registered')
+assert(B.hotkey and B.hotkey.enabled,'Hangar overview shortcut could not be registered')
 return B

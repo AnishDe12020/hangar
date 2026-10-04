@@ -139,7 +139,7 @@ final class Board: NSObject, NSWindowDelegate, NSMenuDelegate {
         let args=CommandLine.arguments.dropFirst().compactMap(Double.init)
         let f=args.count==4 ? NSRect(x:args[0],y:(NSScreen.screens.first?.frame.maxY ?? 900)-args[1]-args[3],width:args[2],height:args[3]) : NSRect(x:100,y:100,width:1100,height:670)
         panel=Panel(contentRect:f,styleMask:[.titled,.closable,.resizable,.utilityWindow],backing:.buffered,defer:false)
-        panel.title="LeanMac Spaces";panel.titleVisibility = .hidden;panel.titlebarAppearsTransparent=true
+        panel.title="Hangar Spaces";panel.titleVisibility = .hidden;panel.titlebarAppearsTransparent=true
         panel.minSize=NSSize(width:820,height:470);panel.level = .floating;panel.hidesOnDeactivate=false
         panel.isReleasedWhenClosed=false;panel.delegate=self
         let effect=NSVisualEffectView(frame:NSRect(origin:.zero,size:f.size));effect.material = .popover;effect.blendingMode = .behindWindow;effect.state = .active

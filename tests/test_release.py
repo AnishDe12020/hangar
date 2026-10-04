@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -37,10 +38,19 @@ class Release(unittest.TestCase):
                 for relative, expected in manifest['files'].items():
                     self.assertEqual(hashlib.sha256(z.read(prefix + relative)).hexdigest(), expected)
                     self.assertNotIn(b'PRIVATE FIXTURE', z.read(prefix + relative))
-                for relative in ['bin/leanmac', 'install.command']:
+                for relative in ['bin/hangar', 'bin/leanmac', 'install.command']:
                     self.assertEqual((z.getinfo(prefix + relative).external_attr >> 16) & 0o777, 0o755)
+                self.assertEqual(manifest['product'], 'Hangar')
+                self.assertEqual(manifest['license'], 'MIT')
+                self.assertIn(b'Copyright (c) 2026 Anish De', z.read(prefix + 'LICENSE'))
+                self.assertNotIn('LICENSE-DECISION.md', names)
                 self.assertIn('config/leanmac-picker.swift', names)
                 self.assertNotIn('config/leanmac-hotkeys.swift', names)
+                extracted = Path(directory) / 'extracted'
+                z.extractall(extracted)
+                for command in ['hangar', 'leanmac']:
+                    result = subprocess.run(['/bin/bash', str(extracted / archive.stem / 'bin' / command), '--help'], capture_output=True, text=True, check=True)
+                    self.assertIn('usage: hangar', result.stdout)
 
     def test_runtime_dependencies_are_packaged(self):
         import ast

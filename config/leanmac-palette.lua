@@ -32,7 +32,7 @@ local function restoreOrigin(origin, done)
   local args = {tostring(origin.pid), tostring(origin.id)}
   for _, value in ipairs(origin.restores) do table.insert(args, value) end
   R.run(focusHelper, args, function(code, _, err)
-    if code ~= 0 then hs.alert.show('Could not restore the original window'); hs.printf('LeanMac palette: %s', err); return end
+    if code ~= 0 then hs.alert.show('Could not restore the original window'); hs.printf('Hangar palette: %s', err); return end
     win:raise()
     hs.timer.doAfter(0.08, done)
   end)
@@ -73,7 +73,7 @@ function C.refresh()
     local ok, bindings = pcall(hs.json.decode, out)
     if code ~= 0 or not ok or type(bindings) ~= 'table' then return end
     local choices, actions = {}, {}
-    add(choices, actions, 'doctor', 'Diagnose LeanMac', 'Secure Input · services · displays · shortcuts', C.diagnose)
+    add(choices, actions, 'doctor', 'Diagnose Hangar', 'Secure Input · services · displays · shortcuts', C.diagnose)
     add(choices, actions, 'windows', 'Search windows', '⌃⌥⌘W · exact window picker', function() leanmac.picker.start(false, false) end)
     add(choices, actions, 'layouts', 'Window layouts', '⌥G · split pairs, zoom, resize and reset', function() leanmac.groups.show() end)
     add(choices, actions, 'overview', 'Workspace overview', '⌥O · drag windows and linked pairs between spaces', function() leanmac.overview.show() end)
@@ -108,11 +108,11 @@ end
 C.chooser = hs.chooser.new(function(choice)
   local origin, action = C.origin, choice and C.visibleActions[choice.id]
   hs.timer.doAfter(0.12, function() restoreOrigin(origin, action or function() end) end)
-end):rows(12):width(65):searchSubText(true):placeholderText('LeanMac · search a command or shortcut')
+end):rows(12):width(65):searchSubText(true):placeholderText('Hangar · search a command or shortcut')
 C.reportChooser = hs.chooser.new(function()
   local origin = C.origin
   hs.timer.doAfter(0.12, function() restoreOrigin(origin, function() end) end)
-end):rows(12):width(70):searchSubText(true):placeholderText('LeanMac doctor · read-only report · Escape to close')
+end):rows(12):width(70):searchSubText(true):placeholderText('Hangar doctor · read-only report · Escape to close')
 function C.diagnose()
   R.run(R.cli, {'doctor', '--json'}, function(_, out, err)
     local ok, report = pcall(hs.json.decode, out)
@@ -139,6 +139,6 @@ function C.show()
   C.refresh() -- refresh the next opening without moving rows under the user
 end
 C.hotkey = hs.hotkey.bind({'ctrl', 'alt', 'cmd'}, '/', C.show)
-assert(C.hotkey and C.hotkey.enabled, 'LeanMac palette shortcut could not be registered')
+assert(C.hotkey and C.hotkey.enabled, 'Hangar palette shortcut could not be registered')
 C.refresh()
 return C

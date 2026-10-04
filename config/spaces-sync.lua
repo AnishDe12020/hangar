@@ -8,7 +8,7 @@ local function aero(args)
   local task
   task = hs.task.new(cli, function(code, out, err)
     M.tasks[task] = nil
-    if code ~= 0 then hs.printf('LeanMac spaces: %s', err or out) end
+    if code ~= 0 then hs.printf('Hangar spaces: %s', err or out) end
   end, args)
   if task then M.tasks[task] = true; task:start() end
 end

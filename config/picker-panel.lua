@@ -135,7 +135,7 @@ function M.new(done)
         self:endPresentation(); done(nil)
         hs.alert.show('Window panel unavailable; retry Option+Tab')
       end
-      if code ~= 0 then hs.printf('LeanMac picker: %s', err or '') end
+      if code ~= 0 then hs.printf('Hangar picker: %s', err or '') end
     end, function(_, out)
       if self.task ~= task then return false end
       buffer=buffer .. (out or '')
@@ -156,7 +156,7 @@ function M.new(done)
     if not task or not task:start() then
       self.task=nil; self.queued={}
       if self.visible then self:endPresentation(); done(nil) end
-      hs.alert.show('Native picker is missing. Run leanmac install.')
+      hs.alert.show('Native picker is missing. Run hangar install.')
       return false
     end
     self.timeout=hs.timer.doAfter(3,function()

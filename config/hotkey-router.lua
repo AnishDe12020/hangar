@@ -9,7 +9,7 @@ local function aero(args)
   local task
   task = hs.task.new(cli, function(code, out, err)
     H.tasks[task] = nil
-    if code ~= 0 then hs.printf('LeanMac gesture: %s', err or out) end
+    if code ~= 0 then hs.printf('Hangar gesture: %s', err or out) end
   end, args)
   if task then H.tasks[task] = true; task:start() end
 end
@@ -79,7 +79,7 @@ local function showKeymap()
   H.keymapCanvas[2] = {type='rectangle', action='stroke',
     strokeColor={hex='#6b8cff', alpha=0.8}, strokeWidth=2,
     roundedRectRadii={xRadius=18, yRadius=18}}
-  H.keymapCanvas[3] = {type='text', text='LeanMac · AeroSpace keymap',
+  H.keymapCanvas[3] = {type='text', text='Hangar · AeroSpace keymap',
     frame={x=32, y=22, w=width-64, h=42}, textSize=25,
     textColor={hex='#f4f6ff'}, textFont='SF Pro Display'}
   H.keymapCanvas[4] = {type='text', text=keymapLeft,

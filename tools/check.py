@@ -16,7 +16,7 @@ def main():
     args = parser.parse_args()
     subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*.py'], cwd=ROOT, check=True)
     subprocess.run([sys.executable, 'tests/run_picker_tests.py'], cwd=ROOT, check=True)
-    for script in ('install.command', 'bin/leanmac'):
+    for script in ('install.command', 'bin/hangar', 'bin/leanmac'):
         subprocess.run(['/bin/bash', '-n', script], cwd=ROOT, check=True)
     if args.native:
         spec = importlib.util.spec_from_file_location('leanmac', ROOT / 'tools/leanmac.py')

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only LeanMac diagnostics and recoverable configuration installs."""
+"""Read-only Hangar diagnostics and recoverable configuration installs."""
 import argparse
 import concurrent.futures
 import contextlib
@@ -21,8 +21,9 @@ import tempfile
 import time
 import tomllib
 
-VERSION = '2026.10.04.1'
+VERSION = '2026.10.04.2'
 USER_DIR = Path.home()
+# Stable storage namespace shared with existing LeanMac installations.
 STATE = USER_DIR / 'Library/Application Support/LeanMac'
 CONFIG = USER_DIR / '.aerospace.toml'
 HS_DIR = USER_DIR / '.hammerspoon'
@@ -150,7 +151,7 @@ def doctor():
     if not state:
         add('hammerspoon', 'fail', 'Hammerspoon IPC unavailable: ' + errors.get('hs', 'unknown error'))
     else:
-        for key, message in [('accessibility', 'Hammerspoon Accessibility'), ('loaded', 'LeanMac modules loaded'),
+        for key, message in [('accessibility', 'Hammerspoon Accessibility'), ('loaded', 'Hangar modules loaded'),
                              ('pickerSubscriber', 'Window picker event subscription'), ('pickerForward', 'Option+Tab'),
                              ('pickerBackward', 'Option+Shift+Tab'), ('pickerSearch', 'Search picker'),
                              ('snapKeys', 'Option+arrow snapping'), ('snapMouse', 'Drag snapping'),
@@ -214,7 +215,7 @@ def print_report(report, as_json=False):
     if as_json:
         print(json.dumps(report, ensure_ascii=False))
     else:
-        print(f"LeanMac {report['version']} · {report['machine']} · {report.get('profile', '?')}")
+        print(f"Hangar {report['version']} · {report['machine']} · {report.get('profile', '?')}")
         for c in report['checks']:
             print(f"[{c['status'].upper():4}] {c['message']}")
 
@@ -314,7 +315,7 @@ def install_lock():
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise RuntimeError('Another LeanMac install/rollback is running')
+            raise RuntimeError('Another Hangar install/rollback is running')
         yield
 
 
@@ -428,7 +429,7 @@ def restore_transaction(backup, manifest):
 
 def install(kit, check_only=False, extras=False):
     if kit is None:
-        raise RuntimeError('No source kit found. Extract a release and pass install --kit /path/to/LeanMac')
+        raise RuntimeError('No source kit found. Extract a release and pass install --kit /path/to/Hangar')
     kit = kit.resolve()
     profile = selected_profile()
     candidate = kit / 'config' / ('aerospace.toml' if profile == 'default' else f'aerospace-{profile}.toml')
@@ -445,7 +446,7 @@ def install(kit, check_only=False, extras=False):
             raise RuntimeError('The experimental native router must stay inactive')
         init = (HS_DIR / 'init.lua').read_text() if (HS_DIR / 'init.lua').exists() else ''
         if not re.search(r'(?m)^\s*leanmac\s*=\s*require\s*\(?\s*[\"\']leanmac[\"\']', init):
-            init += '\n-- LeanMac utilities\nleanmac = require("leanmac")\n'
+            init += '\n-- Hangar utilities\nleanmac = require("leanmac")\n'
         atomic_bytes(stage / 'init.lua', init.encode())
         staged[HS_DIR / 'init.lua'] = stage / 'init.lua'
         shutil.copy2(candidate, stage / 'aerospace.toml')
@@ -464,7 +465,7 @@ def install(kit, check_only=False, extras=False):
         overview = overview_app / 'Contents/MacOS/leanmac-overview'
         overview.parent.mkdir(parents=True)
         atomic_bytes(overview_app / 'Contents/Info.plist', plistlib.dumps({
-            'CFBundleIdentifier': 'local.leanmac.overview', 'CFBundleName': 'LeanMac Spaces',
+            'CFBundleIdentifier': 'local.leanmac.overview', 'CFBundleName': 'Hangar Spaces',
             'CFBundleExecutable': 'leanmac-overview', 'CFBundlePackageType': 'APPL',
             'CFBundleVersion': VERSION, 'LSUIElement': True, 'NSHighResolutionCapable': True}))
         run(['/usr/bin/xcrun', 'swiftc', '-module-cache-path', stage / 'SwiftModuleCache',
@@ -479,7 +480,7 @@ def install(kit, check_only=False, extras=False):
         picker = picker_app / 'Contents/MacOS/leanmac-picker'
         picker.parent.mkdir(parents=True)
         atomic_bytes(picker_app / 'Contents/Info.plist', plistlib.dumps({
-            'CFBundleIdentifier': 'local.leanmac.picker', 'CFBundleName': 'LeanMac Windows',
+            'CFBundleIdentifier': 'local.leanmac.picker', 'CFBundleName': 'Hangar Windows',
             'CFBundleExecutable': 'leanmac-picker', 'CFBundlePackageType': 'APPL',
             'CFBundleVersion': VERSION, 'LSUIElement': True, 'NSHighResolutionCapable': True}))
         run(['/usr/bin/xcrun', 'swiftc', '-module-cache-path', stage / 'SwiftModuleCache',
@@ -490,6 +491,7 @@ def install(kit, check_only=False, extras=False):
         for asset in picker_app.rglob('*'):
             if asset.is_file():
                 staged[HS_DIR / 'bin/LeanMacPicker.app' / asset.relative_to(picker_app)] = asset
+        staged[USER_DIR / '.local/bin/hangar'] = kit / 'bin/hangar'
         staged[USER_DIR / '.local/bin/leanmac'] = kit / 'bin/leanmac'
         staged[USER_DIR / '.local/lib/leanmac/leanmac.py'] = kit / 'tools/leanmac.py'
         if extras:
@@ -499,6 +501,7 @@ def install(kit, check_only=False, extras=False):
                     'ProgramArguments': ['/usr/bin/open', '-gj', '-a', app], 'RunAtLoad': True}))
                 staged[USER_DIR / 'Library/LaunchAgents' / plist.name] = plist
         compile((kit / 'tools/leanmac.py').read_text(), 'leanmac.py', 'exec')
+        run(['/bin/bash', '-n', kit / 'bin/hangar'], required=True)
         run(['/bin/bash', '-n', kit / 'bin/leanmac'], required=True)
         run(['/bin/bash', '-n', kit / 'install.command'], required=True)
         print(f'Staging passed: {profile}, {len(LUA_FILES) + 1} Lua files, TOML profiles, compiled/signed focus helper.', flush=True)
@@ -510,7 +513,7 @@ def install(kit, check_only=False, extras=False):
             raise RuntimeError('Experimental native helper is installed/running; disable it before installing')
         for old in (STATE / 'backup').glob('*/manifest.json'):
             if json.loads(old.read_text()).get('status') in ('applying', 'rollback-failed'):
-                raise RuntimeError(f'Unfinished transaction: {old.parent.name}. Run leanmac rollback {old.parent.name}')
+                raise RuntimeError(f'Unfinished transaction: {old.parent.name}. Run hangar rollback {old.parent.name}')
         xdg = Path(os.environ.get('XDG_CONFIG_HOME', USER_DIR / '.config')) / 'aerospace/aerospace.toml'
         paths = list(staged)
         if xdg.exists() or xdg.is_symlink():
@@ -537,7 +540,7 @@ def install(kit, check_only=False, extras=False):
             manifest['status'] = 'applying'
             save_manifest(backup, manifest)
             for dest, source in staged.items():
-                atomic_bytes(dest, source.read_bytes(), 0o755 if dest.name in ('leanmac', 'leanmac-window-focus', 'leanmac-overview', 'leanmac-picker') else 0o600)
+                atomic_bytes(dest, source.read_bytes(), 0o755 if dest.name in ('hangar', 'leanmac', 'leanmac-window-focus', 'leanmac-overview', 'leanmac-picker') else 0o600)
             if xdg in paths:
                 xdg.unlink()  # The exact duplicate is retained in the backup.
             # Atomic per file; AeroSpace semantic validation requires its live config path.
@@ -576,7 +579,7 @@ def install(kit, check_only=False, extras=False):
             manifest['status'] = 'committed'
             save_manifest(backup, manifest)
             atomic_bytes(STATE / 'last-install', backup.name.encode())
-            print(f'Installed and verified. Backup: {backup}\nPalette: Control+Option+Command+/\nCheck: leanmac doctor', flush=True)
+            print(f'Installed and verified. Backup: {backup}\nPalette: Control+Option+Command+/\nCheck: hangar doctor', flush=True)
         except BaseException as e:
             manifest['error'] = str(e)
             try:
@@ -604,7 +607,7 @@ def rollback(name):
         manifest = json.loads((backup / 'manifest.json').read_text())
         if manifest.get('schema') != 1:
             raise RuntimeError('This backup predates transactional installs; follow README rollback instructions')
-        allowed = {HS_DIR / n for n in LUA_FILES + ('init.lua', 'workspace-overview.html')} | {CONFIG,
+        allowed = {USER_DIR / '.local/bin/hangar'} | {HS_DIR / n for n in LUA_FILES + ('init.lua', 'workspace-overview.html')} | {CONFIG,
             HS_DIR / 'bin/leanmac-window-focus', HS_DIR / 'bin/leanmac-overview',
             HS_DIR / 'bin/LeanMacOverview.app/Contents/Info.plist',
             HS_DIR / 'bin/LeanMacOverview.app/Contents/MacOS/leanmac-overview',
@@ -651,7 +654,7 @@ def default_kit():
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog='hangar', description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     d = sub.add_parser('doctor', help='Read-only checks; exit 0 healthy, 1 warnings, 2 failures')
     d.add_argument('--json', action='store_true')
@@ -678,10 +681,10 @@ def main():
                 data = json.loads(path.read_text())
                 print(f"{path.parent.name}  {data.get('status', '?')}")
         elif args.command == 'palette':
-            run([HS, '-t', '3', '-c', 'assert(leanmac and leanmac.palette, "LeanMac palette not loaded"); leanmac.palette.show()'], required=True)
+            run([HS, '-t', '3', '-c', 'assert(leanmac and leanmac.palette, "Hangar palette not loaded"); leanmac.palette.show()'], required=True)
         return 0
     except (OSError, ValueError, RuntimeError) as e:
-        print(f'LeanMac: {e}', file=sys.stderr)
+        print(f'Hangar: {e}', file=sys.stderr)
         return 2
 
 

@@ -246,7 +246,7 @@ final class Picker: NSObject, NSSearchFieldDelegate, NSWindowDelegate {
     func start() {
         panel = PickerPanel(contentRect: NSRect(x: 0, y: 0, width: 620, height: 420),
                             styleMask: [.borderless], backing: .buffered, defer: false)
-        panel.title = "LeanMac Window Switcher"; panel.identifier = NSUserInterfaceItemIdentifier("leanmac-picker")
+        panel.title = "Hangar Window Switcher"; panel.identifier = NSUserInterfaceItemIdentifier("leanmac-picker")
         panel.isFloatingPanel = true; panel.level = .popUpMenu; panel.hidesOnDeactivate = false
         panel.animationBehavior = .none
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]

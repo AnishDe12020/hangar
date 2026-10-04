@@ -1,5 +1,5 @@
--- LeanMac: AeroSpace owns windows; Hammerspoon owns utility shortcuts.
-local M = {version = '2026.10.04.1'}
+-- Hangar: AeroSpace owns windows; Hammerspoon owns utility shortcuts.
+local M = {version = '2026.10.04.2'}
 local mods = {'ctrl', 'alt', 'cmd'}
 local cli = hs.fs.attributes('/opt/homebrew/bin/aerospace') and '/opt/homebrew/bin/aerospace' or '/usr/local/bin/aerospace'
 M.tasks = {}
@@ -7,7 +7,7 @@ local function aero(args)
   local task
   task = hs.task.new(cli, function(code, out, err)
     M.tasks[task] = nil
-    if code ~= 0 then hs.printf('LeanMac AeroSpace: %s', err or out) end
+    if code ~= 0 then hs.printf('Hangar AeroSpace: %s', err or out) end
   end, args)
   if task then M.tasks[task] = true; task:start() end
 end

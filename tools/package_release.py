@@ -9,7 +9,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_FILES = (
-    'README.md', 'LICENSE-DECISION.md', 'install.command', 'bin/leanmac',
+    'README.md', 'LICENSE', 'install.command', 'bin/hangar', 'bin/leanmac',
     'tools/leanmac.py',
     'docs/installation.md', 'docs/profiles.md', 'docs/shortcuts.md',
     'docs/troubleshooting.md', 'docs/limitations.md', 'docs/development.md',
@@ -28,14 +28,14 @@ def package(root, output):
     if not version:
         raise ValueError('Missing release version')
     version = version.group(1)
-    name = f'LeanMac-{version}-candidate'
+    name = f'Hangar-{version}-candidate'
     contents = {}
     for relative in RELEASE_FILES:
         source = root / relative
         if source.is_symlink() or not source.resolve().is_relative_to(root):
             raise ValueError(f'Release source must be an ordinary in-repository file: {relative}')
         contents[relative] = source.read_bytes()
-    manifest = {'format': 1, 'version': version, 'status': 'candidate; license decision pending',
+    manifest = {'format': 1, 'version': version, 'product': 'Hangar', 'license': 'MIT', 'status': 'candidate',
                 'files': {key: hashlib.sha256(data).hexdigest() for key, data in sorted(contents.items())}}
     contents['MANIFEST.json'] = (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode()
     output.mkdir(parents=True, exist_ok=True)
@@ -44,7 +44,7 @@ def package(root, output):
         for relative, data in sorted(contents.items()):
             entry = zipfile.ZipInfo(f'{name}/{relative}', date_time=(2026, 1, 1, 0, 0, 0))
             entry.create_system = 3
-            mode = 0o755 if relative in ('install.command', 'bin/leanmac') else 0o644
+            mode = 0o755 if relative in ('install.command', 'bin/hangar', 'bin/leanmac') else 0o644
             entry.external_attr = (0o100000 | mode) << 16
             entry.compress_type = zipfile.ZIP_DEFLATED
             stream.writestr(entry, data)

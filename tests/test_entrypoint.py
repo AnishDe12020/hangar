@@ -14,7 +14,7 @@ class Entrypoint(unittest.TestCase):
         self.kit = Path(self.temp.name) / 'release with spaces'
         (self.kit / 'bin').mkdir(parents=True)
         shutil.copy2(KIT / 'install.command', self.kit / 'install.command')
-        (self.kit / 'bin/leanmac').write_text('#!/bin/bash\nprintf "ARG:%s\\n" "$@"\n')
+        (self.kit / 'bin/hangar').write_text('#!/bin/bash\nprintf "ARG:%s\\n" "$@"\n')
 
     def tearDown(self):
         self.temp.cleanup()

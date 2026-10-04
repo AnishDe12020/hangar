@@ -30,10 +30,10 @@ The public template does not change an already-running Mac. Activating it is an 
 
 ## Native Desktops
 
-AeroSpace workspaces hide inactive windows within macOS Spaces. Native macOS Desktops remain a separate layer. LeanMac neither changes the Dock's automatic Space ordering nor moves Desktop windows at startup.
+AeroSpace workspaces hide inactive windows within macOS Spaces. Native macOS Desktops remain a separate layer. Hangar neither changes the Dock's automatic Space ordering nor moves Desktop windows at startup.
 
 If extra native Desktops are confusing your window workflow, open the palette and choose **Gather windows from extra macOS Desktops**, or press **Control+Option+Command+S**. Both ask before moving windows onto each display's current Desktop. Cancel leaves them alone. Gathering does not delete Desktops; remove unwanted empty Desktops manually in Mission Control.
 
 ## Mouse buttons
 
-Logi Options+ is optional and configured separately. Map the picker button to F17, workspace gestures to F18/F19, and your preferred button to Mission Control. LeanMac consumes those function keys but does not copy device IDs or import mouse settings. Existing mappings on a configured Mac remain yours.
+Logi Options+ is optional and configured separately. Map the picker button to F17, workspace gestures to F18/F19, and your preferred button to Mission Control. Hangar consumes those function keys but does not copy device IDs or import mouse settings. Existing mappings on a configured Mac remain yours.
