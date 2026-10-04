@@ -8,6 +8,16 @@ Hangar is a source kit. Install it from an extracted release folder or a clone a
 
 You need macOS, [Homebrew](https://brew.sh), and Apple's Command Line Tools (`xcode-select --install`). The installer uses Python 3.11+ and compiles its native Swift helpers on your Mac. Helpers are ad-hoc signed locally; this is not a notarized application download.
 
+Install the [2026.10.04.3 preview](https://github.com/AnishDe12020/hangar/releases/tag/v2026.10.04.3) with one command (no GitHub CLI or Hangar Homebrew formula needed):
+
+```sh
+(set -eu; d="$(mktemp -d "${TMPDIR:-/tmp}/hangar.XXXXXX")"; cd "$d"; r="https://github.com/AnishDe12020/hangar/releases/download/v2026.10.04.3"; a="Hangar-2026.10.04.3-candidate.zip"; curl -fL "$r/$a" -o "$a"; curl -fL "$r/$a.sha256" -o "$a.sha256"; shasum -a 256 -c "$a.sha256"; ditto -x -k "$a" .; bash Hangar-2026.10.04.3-candidate/install.command)
+```
+
+This downloads the versioned source archive, verifies its checksum, and runs the installer. Homebrew is still used for dependencies. Read [what installation changes](docs/installation.md) first; after installation, complete the permissions and setup steps below. The downloaded kit stays in the temporary folder; active configuration and rollback backups live separately.
+
+For a manual install, start at step 1. If you used the command above, continue at step 3:
+
 1. Extract the complete Hangar release folder. Read [what installation changes](docs/installation.md) and choose your workspace profile.
 2. In Terminal, enter that folder and run `bash install.command`. It installs missing dependencies, validates a staging copy, backs up existing configuration, and activates Hangar. It may take several minutes on first setup.
 3. In **System Settings → Privacy & Security → Accessibility**, enable AeroSpace, Hammerspoon, and Thaw. Enable **Screen & System Audio Recording** for Shottr and Thaw. The picker and overview do not capture your screen. If first-run checks fail before permissions are granted, grant them and run the installer again.
