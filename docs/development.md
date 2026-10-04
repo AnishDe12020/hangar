@@ -18,7 +18,7 @@ The macOS CI workflow runs the same isolated checks and packaging. It has read-o
 
 `tests/native_pair_smoke.py` and `tests/native_picker_latency.py` create fixture windows and mutate live AeroSpace workspace state. `tests/native_picker_smoke.py` opens an AppKit fixture panel. They are intentionally excluded from the default runner, CI, and install archive. Arrange explicit permission for a GUI testing session before running them; inspect their arguments and cleanup behavior first.
 
-Before promoting a release, test fresh-Mac permissions and activation/rollback, physical Option+Tab release, user mouse mappings, native tab behavior, and display unplug/replug on the supported configurations. The candidate has not been physically tested on another Mac. The imported 2026.09.17.2 baseline was compared with the canonical kit: all 34 comparable imported source files matched, and all 16 checked installed text counterparts matched canonical sources. One remote test source (`tests/test_transaction.py`) could not be read; its remote equality remains unverified. The candidate deliberately differs through the documented distribution, consent, and Hangar rename changes.
+Before promoting a release, test fresh-Mac permissions and activation/rollback, physical Option+Tab release, user mouse mappings, native tab behavior, and display unplug/replug on the supported configurations. The candidate has not been physically tested on another Mac.
 
 ## Distribution ownership
 

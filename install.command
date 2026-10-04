@@ -16,7 +16,8 @@ Usage: bash install.command [--configs-only] [--check]
   --check         Compile and validate only; no dependency install or activation.
   --help          Show this help without changing anything.
 
-A full install adds missing Homebrew dependencies and configures Shottr/Thaw.
+A full install adds missing core dependencies (AeroSpace and Hammerspoon).
+Choose optional apps separately in Ground Control's Quick Install.
 Read README.md and docs/installation.md before activating on a new Mac.
 HELP
       exit 0 ;;
@@ -35,7 +36,7 @@ if ! command -v brew >/dev/null; then
 fi
 export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
 if ! python3 -c 'import tomllib' 2>/dev/null; then brew install python; fi
-for cask in hammerspoon nikitabobko/tap/aerospace shottr thaw; do
+for cask in hammerspoon nikitabobko/tap/aerospace; do
   brew list --cask "${cask##*/}" >/dev/null 2>&1 || brew install --cask "$cask"
 done
-exec /bin/bash ./bin/hangar install --kit "$PWD" --extras
+exec /bin/bash ./bin/hangar install --kit "$PWD"

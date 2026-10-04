@@ -10,9 +10,9 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_FILES = (
     'README.md', 'LICENSE', 'install.command', 'bin/hangar', 'bin/leanmac',
-    'tools/leanmac.py',
+    'tools/leanmac.py', 'tools/hangar_settings.py', 'tools/hangar_catalog.py',
     'docs/installation.md', 'docs/profiles.md', 'docs/shortcuts.md',
-    'docs/troubleshooting.md', 'docs/limitations.md', 'docs/development.md',
+    'docs/troubleshooting.md', 'docs/limitations.md', 'docs/development.md', 'docs/utilities.md',
     'skills/hangar-config/SKILL.md', 'skills/hangar-config/agents/openai.yaml',
     'config/aerospace.toml', 'config/aerospace-numbered-study.toml',
     'config/hangar-config.lua', 'config/leanmac.lua', 'config/window-picker.lua', 'config/window-snap.lua',
@@ -20,6 +20,7 @@ RELEASE_FILES = (
     'config/leanmac-health.lua', 'config/leanmac-palette.lua', 'config/window-groups.lua',
     'config/window-links.lua', 'config/workspace-overview.lua', 'config/picker-panel.lua',
     'config/leanmac-window-focus.swift', 'config/leanmac-overview.swift', 'config/leanmac-picker.swift',
+    'config/hangar-settings.swift', 'config/hangar-shelf.swift', 'config/utility-catalog.json', 'config/Hangar.icns',
 )
 
 

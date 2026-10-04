@@ -30,7 +30,7 @@ or overwriting existing settings. Existing legacy profiles stay available.
 ## Make the requested change
 
 The settings schema is TOML, with `schema = 1`, an optional `profile`, `[apps]`
-(`terminal`, `browser`, `finder`) and `[hotkeys]`. Get the current supported action
+(`terminal`, `browser`, `finder`), `[hotkeys]`, `[modules]` (`shelf = true` or `false`), and optional root `shelf_style = "compact"` or `"glass"`. Get the current supported action
 names and values from `config show --json`; unknown keys fail validation. Chords
 use strings such as `ctrl-alt-cmd-return`, `alt-shift-p` or `f17`. Option+Tab and
 Option+Shift+Tab are reserved for the hold/release picker. Do not change their
@@ -47,6 +47,17 @@ supported behavior; use current AeroSpace documentation for unfamiliar syntax.
 Use shared settings for preferences intended for every Mac and the local overlay
 for host-only differences. Never place tokens, signing keys, Accessibility grants,
 backup journals, compiled helpers or live window-pair state in shared inputs.
+
+For small preference edits, `hangar config schema --json` returns the current
+configuration and revision. Submit a JSON file with `revision`, `scope` (`local`
+or `shared`) and `changes` through `hangar config save --input FILE --json`.
+This preserves ordinary TOML comments and symlinks and rejects stale edits; it
+does not activate the desktop. Use the text editor for advanced TOML or full
+AeroSpace rules. `hangar settings` opens the same editor as a native form.
+
+Apron contents live locally in Application Support, outside dotfiles. Do not
+sync its state or inspect a user's collected items merely to configure its style.
+`hangar shelf PATH...` adds explicitly requested files with an acknowledged result.
 
 ## Validate and apply
 

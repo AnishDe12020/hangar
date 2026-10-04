@@ -77,17 +77,21 @@ Edit `on-window-detected` for app routes, `[workspace-to-monitor-force-assignmen
 
 Keep the template's required workspace/MX navigation keys (Option+1–4, Option+Shift+1–4, F18/F19), helper-window rules, and no conflicting Option+Tab binding. AeroSpace performs full semantic validation during activation; a lightweight check does not claim to validate every upstream command.
 
+## Shelf appearance
+
+Choose **Compact** or **Glass** in Ground Control, or set `shelf_style = "compact"` (default) / `"glass"` at the top of `settings.toml`, before any tables. A local override can choose a different style for each Mac. Save & Apply activates the preference; both styles respect Reduce Transparency.
+
 ## Supported shortcut settings
 
 `[hotkeys]` accepts these semantic action names:
 
 - Launchers/utilities: `terminal`, `browser`, `finder`, `menu_bar`, `menu_search`, `reload`, `management_toggle`.
 - Windows: `picker_search`, `snap_left`, `snap_right`, `snap_up`, `snap_down`, `pair`, `separate`, `layout_menu`, `overview`.
-- Other controls: `palette`, `gather`, `mx_picker`.
+- Other controls: `palette`, `gather`, `mx_picker`, `shelf`, `settings`.
 
 Chords use `ctrl`, `alt`, `cmd`, `shift`, then one key: letters/digits, `return`, `tab`, `space`, `escape`, arrows, `slash`, `comma`, `period`, `backtick`, `minus`, `equal`, or `f1`–`f20`. Modifier order does not matter. `hangar config show` lists every effective chord.
 
-Option+Tab and Option+Shift+Tab remain fixed because both native picker and modifier-release handling own that interaction. Feature disabling, arbitrary Lua hooks, native panel geometry, and custom dependency installation paths are not exposed as settings. AeroSpace/Hammerspoon are discovered in the supported Homebrew/Applications locations. Stable LeanMac storage/bundle identifiers remain compatibility internals.
+Option+Tab and Option+Shift+Tab remain fixed because both native picker and modifier-release handling own that interaction. Set `[modules]` with `shelf = false` to disable Apron and its drag observer. Other feature disabling, arbitrary Lua hooks, native panel geometry, and custom dependency installation paths are not exposed as settings. AeroSpace/Hammerspoon are discovered in the supported Homebrew/Applications locations. Stable LeanMac storage/bundle identifiers remain compatibility internals.
 
 The layout menu invokes semantic AeroSpace commands directly, so remapping its corresponding AeroSpace keys does not break menu actions. Pair/separate/snap/overview hints use configured keys; the overview no longer displays a fixed shortcut.
 
