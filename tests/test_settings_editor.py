@@ -1,5 +1,6 @@
 """Real desired-file edits in temporary homes; never activate a desktop."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -128,6 +129,62 @@ class SettingsEditor(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'during validation'):
                 self.save({'apps': {'browser': 'Firefox'}})
         self.assertEqual(path.read_text(), edited)
+
+    def test_provenance_tracks_source_presence_not_value_equality(self):
+        first = editor.snapshot(lm, ROOT)['provenance']
+        self.assertEqual(first['profile'], 'default')
+        self.assertEqual(first['apps.terminal'], 'legacy')
+        lm.STATE.mkdir()
+        (lm.STATE / 'aerospace-profile').write_text('numbered-study')
+        self.assertEqual(editor.snapshot(lm, ROOT)['provenance']['profile'], 'legacy')
+        (self.config / 'settings.toml').write_text('schema=1\nshelf_style="glass"\n[apps]\nterminal="Ghostty"\n')
+        (self.config / 'settings.local.toml').write_text('[apps]\nterminal="Ghostty"\n[modules]\nshelf=false\n')
+        provenance = editor.snapshot(lm, ROOT)['provenance']
+        self.assertEqual(provenance['apps.terminal'], 'local')
+        self.assertEqual(provenance['apps.browser'], 'default')
+        self.assertEqual(provenance['shelf_style'], 'shared')
+        self.assertEqual(provenance['modules.shelf'], 'local')
+        self.assertEqual(provenance['hotkeys.settings'], 'default')
+        self.assertEqual(provenance['profile'], 'legacy')
+
+    def test_snapshot_retries_when_provenance_input_changes(self):
+        shared = self.config / 'settings.toml'; shared.write_text('shelf_style="compact"\n')
+        original, calls = editor.field_provenance, []
+        def race(*args):
+            result = original(*args)
+            if not calls:
+                (self.config / 'settings.local.toml').write_text('shelf_style="glass"\n')
+            calls.append(True)
+            return result
+        with patch.object(editor, 'field_provenance', side_effect=race):
+            result = editor.snapshot(lm, ROOT)
+        self.assertEqual(result['config']['shelf_style'], 'glass')
+        self.assertEqual(result['provenance']['shelf_style'], 'local')
+        self.assertEqual(result['revision'], editor.revision(lm))
+
+    def test_diagnostics_export_only_copies_allowlisted_typed_facts(self):
+        private = 'PRIVATE_FIXTURE_NEVER_EXPORT'
+        report = {'version': '2026.10.05.2', 'machine': private, 'checkedAt': private,
+                  'profile': private, 'secureInputOwners': [private], 'secureInput': True,
+                  'monitors': [{'uuid': private}], 'workspaces': [private], 'warnings': 999,
+                  'checks': [{'name': 'accessibility', 'status': 'fail', 'message': private},
+                             {'name': 'profile', 'status': 'ok', 'message': private},
+                             {'name': private, 'status': 'fail'},
+                             {'name': 'config-file', 'status': private}],
+                  'hammerspoon': {'loaded': True, 'accessibility': private, 'configdir': private,
+                                  'screens': [{'name': private}], 'lastError': private,
+                                  'reminders': [{'text': private}]}}
+        result = editor.diagnostics_export(report)
+        self.assertNotIn(private, json.dumps(result))
+        self.assertEqual(result['version'], '2026.10.05.2')
+        self.assertEqual(result['checks'], [{'id': 'accessibility', 'status': 'fail'}, {'id': 'profile', 'status': 'ok'}])
+        self.assertEqual(result['counts'], {'ok': 1, 'warn': 0, 'fail': 1})
+        self.assertEqual(result['hammerspoon'], {'loaded': True})
+        self.assertIs(result['secureInput'], True)
+        report['version'] = private; report['secureInput'] = private
+        result = editor.diagnostics_export(report)
+        self.assertNotIn('version', result)
+        self.assertNotIn('secureInput', result)
 
 
 if __name__ == '__main__': unittest.main()

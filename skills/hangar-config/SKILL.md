@@ -57,6 +57,11 @@ AeroSpace rules. `hangar settings` opens the same editor as a native form.
 
 Apron contents live locally in Application Support, outside dotfiles. Do not
 sync its state or inspect a user's collected items merely to configure its style.
+Focus timers and reminders likewise stay in private local state, outside dotfiles.
+Use `hangar settings --tab sessions` or the `hold`, `focus` and `remind` CLI
+commands for explicitly requested sessions; do not write their state JSON by hand.
+Timer lengths and reminder text are runtime actions, not shared TOML settings.
+See `docs/sessions.md` for bounds, persistence and notification behavior.
 `hangar shelf PATH...` adds explicitly requested files with an acknowledged result.
 
 ## Validate and apply

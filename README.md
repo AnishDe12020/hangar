@@ -8,6 +8,9 @@ A keyboard-first Mac workspace: gather files on a shelf, switch windows, arrange
 | **Departures · Window switcher** | Option+Tab through windows and linked pairs, or search by typing. |
 | **Tower · Workspace overview** | See your activities, focus windows, and move or pair them. |
 | **Ground Control · Settings** | Edit launchers and shortcuts, check conflicts, apply safely, and install optional utilities. |
+| **Holding Pattern · Keep awake** | Keep the Mac awake for a chosen duration, with an optional display-awake mode. |
+| **Turnaround · Focus timer** | Run Pomodoro focus and break rounds; pause, resume, or choose when to begin the next phase. |
+| **Boarding Calls · Reminders** | Set a quick local reminder from the Hangar menu or Sessions page. |
 
 Hangar is a source kit. Install it from an extracted release folder or a clone anywhere on your Mac. Your active configuration is copied locally and keeps working offline. Retain the source kit for future configuration changes; the one-command installer saves it in Application Support.
 
@@ -15,10 +18,10 @@ Hangar is a source kit. Install it from an extracted release folder or a clone a
 
 You need macOS 13+, [Homebrew](https://brew.sh), and Apple's Command Line Tools (`xcode-select --install`). Optional apps have their own requirements; Tinycast and Thaw need macOS 26+. The installer uses Python 3.11+ and compiles its native Swift helpers on your Mac. Helpers are ad-hoc signed locally; this is not a notarized application download.
 
-Install the [2026.10.05.1 preview](https://github.com/AnishDe12020/hangar/releases/tag/v2026.10.05.1) with one command (no GitHub CLI or Hangar Homebrew formula needed):
+Install the [2026.10.05.2 preview](https://github.com/AnishDe12020/hangar/releases/tag/v2026.10.05.2) with one command (no GitHub CLI or Hangar Homebrew formula needed):
 
 ```sh
-(set -eu; k="$HOME/Library/Application Support/Hangar/kits"; mkdir -p "$k"; d="$(mktemp -d "$k/release.XXXXXX")"; cd "$d"; r="https://github.com/AnishDe12020/hangar/releases/download/v2026.10.05.1"; a="Hangar-2026.10.05.1-candidate.zip"; curl -fL "$r/$a" -o "$a"; curl -fL "$r/$a.sha256" -o "$a.sha256"; shasum -a 256 -c "$a.sha256"; ditto -x -k "$a" .; bash Hangar-2026.10.05.1-candidate/install.command)
+(set -eu; k="$HOME/Library/Application Support/Hangar/kits"; mkdir -p "$k"; d="$(mktemp -d "$k/release.XXXXXX")"; cd "$d"; r="https://github.com/AnishDe12020/hangar/releases/download/v2026.10.05.2"; a="Hangar-2026.10.05.2-candidate.zip"; curl -fL "$r/$a" -o "$a"; curl -fL "$r/$a.sha256" -o "$a.sha256"; shasum -a 256 -c "$a.sha256"; ditto -x -k "$a" .; bash Hangar-2026.10.05.2-candidate/install.command)
 ```
 
 This downloads the versioned source archive, verifies its checksum, and runs the installer. Homebrew is still used for dependencies. Read [what installation changes](docs/installation.md) first; after installation, complete the permissions and setup steps below. The source kit is retained under `~/Library/Application Support/Hangar/kits` so future settings changes and updates can rebuild the helpers. Active configuration and rollback backups live separately.
@@ -35,7 +38,7 @@ Already have the core dependencies? Use `bash install.command --configs-only`. O
 
 ## Make it yours
 
-Ground Control edits **This Mac only** by default. Choose **Shared dotfiles** to edit portable settings instead. **Save only** validates your edits without changing the desktop; **Save & Apply** activates them with a rollback backup. Existing comments and ordinary dotfiles symlinks are preserved, and stale edits are rejected. Advanced TOML forms that cannot be edited losslessly stay available through your text editor.
+Ground Control edits **This Mac** by default. Choose **Shared dotfiles** to edit portable settings instead. **Save** validates your edits without changing the desktop; **Save & Apply** activates them with a rollback backup. Existing comments and ordinary dotfiles symlinks are preserved, and stale edits are rejected. Advanced TOML forms that cannot be edited losslessly stay available through your text editor.
 
 ```sh
 hangar config init                 # create portable defaults; does not activate
@@ -54,6 +57,26 @@ Git can share the source folder across Macs; each Mac validates and applies deli
 Press **Control + Option + Command + A** to open the file shelf, then drop in files, images, text or links. Choose **Compact** or **Glass** under **General → Apron style** in Ground Control. Gather related items into named shelves and drag a selection into Finder, Mail or another app. Quick Look, reveal and copy-path actions are available from the shelf. Missing original files can be reconnected; removing an item or clearing a shelf never deletes an original.
 
 `hangar shelf /path/to/file` adds files from Terminal or an agent. Shelf contents stay on this Mac, outside your dotfiles configuration. When enabled, Apron stays resident to detect a deliberate shake while dragging; it uses an event observer rather than an idle polling timer. Disable it in Ground Control to stop the helper.
+
+Use **Command+F** to filter the current shelf. **Share…** opens the native macOS sharing picker; **Copy Contents** copies a single saved text, image or link directly. **Copy Items** continues to copy file references.
+
+The **Quick Tools** submenu creates new files: resize/optimize an image to JPEG or PNG, merge selected PDFs in shelf order, extract a page range such as `1, 3–5`, or bundle files and folders into a portable ZIP. Choose a new filename; originals and existing outputs are never replaced. Finished copies appear on the shelf. Image optimization applies orientation, converts to sRGB and removes source metadata/location information; JPEG flattens transparency onto white. Animated images and encrypted PDFs are refused. See [limits](docs/limitations.md) for size bounds.
+
+## Quick sessions from the menu bar
+
+The **✈︎ Hangar menu** opens the shelf, window tools and settings, and starts keep-awake, focus and reminder actions. Ground Control's **Sessions** page provides the same controls. [Sessions guide](docs/sessions.md)
+
+```sh
+hangar hold start --minutes 30             # display may sleep
+hangar hold start --minutes 30 --display   # keep display awake too
+hangar hold stop
+hangar focus start --minutes 25 --break-minutes 5
+hangar focus pause                        # also: resume, next, cancel, status
+hangar remind add "Check the export" --minutes 15
+hangar remind list                        # cancel with: hangar remind cancel ID
+```
+
+Focus timers and reminders survive ordinary Hammerspoon reloads and resume after sleep. Notifications follow macOS settings; the next focus/break phase starts only when you choose it. Keep-awake sessions end on expiry, Stop, or Hammerspoon shutdown/reload and never change your global power settings.
 
 ## Learn five default shortcuts
 

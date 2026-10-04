@@ -21,7 +21,7 @@ state = lib.luaL_newstate()
 try:
     lib.luaL_openlibs(state)
     # Lua long strings keep the source path literal, including its spaces.
-    files = ('test_configuration.lua', 'test_spaces.lua', 'test_picker_tabs.lua', 'test_window_groups.lua', 'test_overview.lua', 'test_picker_display.lua', 'test_picker_panel.lua')
+    files = ('test_configuration.lua', 'test_hold.lua', 'test_sessions.lua', 'test_spaces.lua', 'test_picker_tabs.lua', 'test_window_groups.lua', 'test_overview.lua', 'test_picker_display.lua', 'test_picker_panel.lua')
     if len(sys.argv) > 1 and sys.argv[1] == 'bench':
         files = ('bench_picker.lua',)
     source = "KIT = [==[" + str(kit) + "]==]; HANGAR_TEST_SETTINGS=" + lm.lua_literal(defaults) + "; dofile(KIT .. '/tests/config_fixture.lua');" + ";".join(

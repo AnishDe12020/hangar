@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import shlex
 import time
 from unittest.mock import patch
 from pathlib import Path
@@ -43,9 +44,101 @@ class CatalogTests(unittest.TestCase):
     def catalog(self, **kwargs):
         options = dict(app_dirs=[self.apps], system='Darwin', macos='26.0',
                        architecture='arm64', brew='/opt/homebrew/bin/brew',
-                       lock_path=self.root / 'install.lock', runner=self.runner)
+                       lock_path=self.root / 'install.lock', runner=self.runner,
+                       brew_prefixes=[self.root.resolve() / 'Homebrew'],
+                       launcher_dir=self.root.resolve() / 'Launchers')
         options.update(kwargs)
         return cat.Catalog(**options)
+
+    def mole(self, prefix=None):
+        prefix = prefix or self.root.resolve() / 'Homebrew'
+        executable = prefix / 'Cellar/mole/1.35.0/bin/mo'
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_text('#!/bin/sh\nexit 0\n')
+        executable.chmod(0o755)
+        (prefix / 'bin').mkdir(exist_ok=True)
+        (prefix / 'bin/mo').symlink_to(executable)
+        return executable
+
+    def test_mole_formula_install_and_known_discovery_preserve_existing_command(self):
+        def install(command, emit):
+            self.calls.append(command)
+            self.mole()
+            return subprocess.CompletedProcess(command, 0, '')
+        catalog = self.catalog(runner=install)
+        result = catalog.install('mole')
+        self.assertEqual(result['status'], 'installed')
+        self.assertEqual(self.calls, [['/opt/homebrew/bin/brew', 'install', '--formula', 'homebrew/core/mole']])
+        self.assertEqual(catalog.install('mole')['status'], 'already_installed')
+        self.assertEqual(len(self.calls), 1)
+        item = next(x for x in catalog.status() if x['id'] == 'mole')
+        self.assertEqual(item['type'], 'cli')
+        self.assertEqual(item['package_type'], 'formula')
+        self.assertTrue(item['launch_available'])
+        self.assertFalse(item['available'])
+        self.assertIn('Terminal', item['launch_label'])
+        self.assertFalse((self.root / 'Launchers').exists(), 'Listing and installation must not generate scripts')
+
+    def test_unknown_mo_occupant_is_preserved_and_cannot_be_opened(self):
+        prefix = self.root.resolve() / 'Homebrew'
+        (prefix / 'bin').mkdir(parents=True)
+        occupant = prefix / 'bin/mo'
+        occupant.write_text('unrelated command')
+        occupant.chmod(0o755)
+        catalog = self.catalog()
+        self.assertEqual(catalog.install('mole')['status'], 'blocked')
+        self.assertEqual(catalog.open('mole')['status'], 'not_installed')
+        self.assertEqual(occupant.read_text(), 'unrelated command')
+        occupant.unlink()
+        outside = self.root / 'other-mo'
+        outside.write_text('#!/bin/sh\nexit 0\n')
+        outside.chmod(0o755)
+        occupant.symlink_to(outside)
+        self.assertEqual(catalog.install('mole')['status'], 'blocked')
+        self.assertEqual(self.calls, [])
+
+    def test_opener_allows_recognized_apps_and_only_fixed_mole_status(self):
+        installed = self.app('My Shottr.app')
+        catalog = self.catalog()
+        self.assertEqual(catalog.open('shottr')['status'], 'opened')
+        self.assertEqual(self.calls, [['/usr/bin/open', str(installed)]])
+        self.calls.clear()
+        for value in ('stats', 'mole clean', '--force', '../mole'):
+            self.assertFalse(catalog.open(value)['ok'])
+        self.assertEqual(self.calls, [])
+        # A path containing shell syntax still becomes one quoted executable argument.
+        prefix = self.root.resolve() / "Homebrew's ; quoted"
+        executable = self.mole(prefix)
+        catalog = self.catalog(brew_prefixes=[prefix])
+        result = catalog.open('mole')
+        self.assertEqual(result['status'], 'opened')
+        script = self.root.resolve() / 'Launchers/Mole Status.command'
+        self.assertEqual(self.calls, [['/usr/bin/open', '-a', '/System/Applications/Utilities/Terminal.app', str(script)]])
+        self.assertEqual(shlex.split(script.read_text().splitlines()[-1]), ['exec', str(executable), 'status'])
+        self.assertEqual(script.stat().st_mode & 0o777, 0o700)
+        self.assertTrue(catalog.open('mole')['ok'], 'An owned generated launcher can be refreshed')
+
+    def test_mole_launcher_refuses_unrelated_files_and_symlinked_paths(self):
+        self.mole()
+        directory = self.root.resolve() / 'Launchers'
+        directory.mkdir()
+        target = directory / 'Mole Status.command'
+        target.write_text('user script')
+        catalog = self.catalog()
+        self.assertEqual(catalog.open('mole')['status'], 'failed')
+        self.assertEqual(target.read_text(), 'user script')
+        target.unlink()
+        outside = self.root / 'outside'
+        outside.write_text('preserve')
+        target.symlink_to(outside)
+        self.assertEqual(catalog.open('mole')['status'], 'failed')
+        self.assertEqual(outside.read_text(), 'preserve')
+        target.unlink()
+        directory.rmdir()
+        directory.symlink_to(self.apps, target_is_directory=True)
+        self.assertEqual(catalog.open('mole')['status'], 'failed')
+        self.assertFalse((self.apps / 'Mole Status.command').exists())
+        self.assertEqual(self.calls, [])
 
     def test_compatibility_distinguishes_app_support_from_installer_support(self):
         entries = {x['id']: x for x in self.catalog(macos='11.0').status()}

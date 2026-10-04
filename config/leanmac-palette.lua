@@ -76,6 +76,23 @@ function C.refresh()
     local choices, actions = {}, {}
     add(choices, actions, 'doctor', 'Diagnose Hangar', 'Secure Input · services · displays · shortcuts', C.diagnose)
     add(choices, actions, 'settings', 'Ground Control · Settings', U.label('settings') .. ' · launchers, shortcuts, Quick Install and recovery', function() leanmac.openUtility('settings') end)
+    for _, duration in ipairs({15, 30, 60, 120}) do
+      local minutes = duration
+      add(choices, actions, 'hold-' .. minutes, 'Keep Mac awake for ' .. minutes .. ' minutes', 'Holding Pattern · display can sleep', function()
+        local result = leanmac.hold.start(minutes, false)
+        hs.alert.show(result.ok and ('Keeping Mac awake for ' .. minutes .. ' minutes') or result.lastError)
+      end)
+    end
+    add(choices, actions, 'hold-display', 'Keep Mac and display awake for 30 minutes', 'Holding Pattern · useful during a presentation', function()
+      local result = leanmac.hold.start(30, true)
+      hs.alert.show(result.ok and 'Keeping Mac and display awake for 30 minutes' or result.lastError)
+    end)
+    add(choices, actions, 'hold-stop', 'Stop keeping Mac awake', 'End this Holding Pattern session', function() leanmac.hold.stop() end)
+    add(choices, actions, 'focus-start', 'Start a 25-minute focus session', 'Turnaround · Pomodoro timer with breaks', function()
+      local result = leanmac.sessions.startFocus({})
+      if not result.ok then hs.alert.show(result.error) end
+    end)
+    add(choices, actions, 'reminder', 'Remind me in 15 minutes…', 'Boarding Call · quick local reminder', function() leanmac.quickReminder(15) end)
     if not U.modules or U.modules.shelf ~= false then
       add(choices, actions, 'shelf', 'Apron · File shelf', U.label('shelf') .. ' · gather files, text and links', function() leanmac.openUtility('shelf') end)
     end
