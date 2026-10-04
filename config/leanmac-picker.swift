@@ -131,6 +131,31 @@ func grouped(_ windows: [WindowItem]) -> [WindowRow] {
     }
     return result
 }
+// Search ranks only matching rows. Empty queries retain the incoming MRU order.
+func searchRows(_ rows: [WindowRow], query: String, workspace: String?) -> [WindowRow] {
+    func normalized(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+    let needle = normalized(query), tokens = needle.split(separator: " ").map(String.init)
+    func score(_ item: WindowItem) -> Int {
+        let app = normalized(item.app ?? ""), title = normalized(item.title)
+        if app == needle { return 0 }; if title == needle { return 1 }
+        if app.hasPrefix(needle) { return 2 }; if title.hasPrefix(needle) { return 3 }
+        let words = (app + " " + title).split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        if tokens.allSatisfy({ token in words.contains { $0.hasPrefix(token) } }) { return 4 }
+        if tokens.allSatisfy({ app.contains($0) || title.contains($0) }) { return 5 }
+        return 6 // A workspace/display-only match stays behind app/title matches.
+    }
+    let matching = rows.enumerated().compactMap { index, row -> (index: Int, row: WindowRow, score: Int)? in
+        guard workspace == nil || workspace == row.workspace else { return nil }
+        let members = row.members.filter { $0.matches(query) }
+        guard !members.isEmpty else { return nil }
+        return (index, row, needle.isEmpty ? 0 : members.map(score).min()!)
+    }
+    return matching.sorted { $0.score == $1.score ? $0.index < $1.index : $0.score < $1.score }.map(\.row)
+}
+
 let ink = NSColor.labelColor
 let muted = NSColor.secondaryLabelColor
 let accent = NSColor.controlAccentColor
@@ -465,9 +490,7 @@ final class Picker: NSObject, NSSearchFieldDelegate, NSWindowDelegate {
     }
     func controlTextDidChange(_ obj: Notification) { query = search.stringValue; render() }
     func render() {
-        filtered = rows.filter { row in
-            (filterSpace == nil || filterSpace == row.workspace) && row.members.contains { $0.matches(query) }
-        }
+        filtered = searchRows(rows, query: query, workspace: filterSpace)
         order = filtered.map { $0.id }
         if selected == nil || !order.contains(selected!) { selected = order.first }
         content.subviews.forEach { $0.removeFromSuperview() }; tiles = [:]
@@ -566,7 +589,28 @@ if CommandLine.arguments.contains("--self-test") {
     precondition(grouped([w(1,"1",1)]).count == 1)
     precondition(grouped([w(1,"1"),w(1,"1")]).count == 1)
     precondition(w(1,"1").matches("app 1")); precondition(!w(1,"1").matches("missing"))
-    print("Native picker model: 10 checks passed")
+    func result(_ id: Int, app: String, title: String, space: String = "1") -> WindowItem {
+        WindowItem(id: id, pid: 1, title: title, app: app, bundle: nil, workspace: space, monitor: "Display", visible: true, partner: nil, pairSlot: nil)
+    }
+    let ranked = grouped([
+        result(10, app: "Browser", title: "A note about Safari"), result(11, app: "Safari Technology Preview", title: "Home"),
+        result(12, app: "Safari", title: "Other"), result(13, app: "Notes", title: "Safari"),
+        result(14, app: "Safari", title: "Later"), result(15, app: "Finder", title: "Files", space: "Safari")])
+    precondition(searchRows(ranked, query: "safari", workspace: nil).map(\.id) == [12, 14, 13, 11, 10, 15])
+    precondition(searchRows(ranked, query: "  SAFARI  ", workspace: nil).map(\.id) == [12, 14, 13, 11, 10, 15])
+    precondition(searchRows(ranked, query: "", workspace: nil).map(\.id) == ranked.map(\.id))
+    precondition(searchRows(ranked, query: "   ", workspace: nil).map(\.id) == ranked.map(\.id))
+    precondition(searchRows(ranked, query: "safari", workspace: "Safari").map(\.id) == [15])
+    let accented = grouped([result(20, app: "Notes", title: "Café plans"), result(21, app: "Preview", title: "Plans for a café")])
+    precondition(searchRows(accented, query: "cafe", workspace: nil).map(\.id) == [20, 21])
+    precondition(searchRows(accented, query: "plans cafe", workspace: nil).map(\.id) == [20, 21])
+    // Ranking never rebuilds pair identities or changes the MRU focus member.
+    let pairs = grouped([w(3,"1",1), w(1,"1",3), w(2,"1")])
+    precondition(searchRows(pairs, query: "window 1", workspace: nil)[0].focusID == 3)
+    let visible = searchRows(ranked, query: "Safari", workspace: nil).map(\.id)
+    precondition(visible.contains(10) && visible.first == 12)
+    precondition(searchRows(ranked, query: "Technology", workspace: nil).map(\.id) == [11])
+    print("Native picker model: grouping/MRU plus deterministic search exact/prefix/Unicode/tie/filter checks passed")
 } else {
     let app = NSApplication.shared; app.setActivationPolicy(.accessory)
     let picker = Picker()
