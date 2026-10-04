@@ -8,7 +8,7 @@ persistent-workspaces = ['1','2','3','4']
 on-focused-monitor-changed = ['move-mouse monitor-lazy-center']
 
 # AeroSpace workspaces are off-screen hides, not extra macOS Desktops.
-# Keep one macOS Space per display; Hammerspoon collapses leftovers after unplug.
+# Native Desktops stay unchanged unless the user confirms Gather windows.
 
 # New routed windows leave any current horizontal split and start as standalone views.
 # Pairing is explicit (Hammerspoon: Option+P); layout shortcuts never flatten groups.
