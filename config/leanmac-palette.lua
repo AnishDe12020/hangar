@@ -1,3 +1,4 @@
+local U = require('hangar-config')
 local R = require('leanmac-runtime')
 local C = {choices = {}, actions = {}}
 local focusHelper = hs.configdir .. '/bin/leanmac-window-focus'
@@ -32,7 +33,7 @@ local function restoreOrigin(origin, done)
   local args = {tostring(origin.pid), tostring(origin.id)}
   for _, value in ipairs(origin.restores) do table.insert(args, value) end
   R.run(focusHelper, args, function(code, _, err)
-    if code ~= 0 then hs.alert.show('Could not restore the original window'); hs.printf('LeanMac palette: %s', err); return end
+    if code ~= 0 then hs.alert.show('Could not restore the original window'); hs.printf('Hangar palette: %s', err); return end
     win:raise()
     hs.timer.doAfter(0.08, done)
   end)
@@ -73,22 +74,20 @@ function C.refresh()
     local ok, bindings = pcall(hs.json.decode, out)
     if code ~= 0 or not ok or type(bindings) ~= 'table' then return end
     local choices, actions = {}, {}
-    add(choices, actions, 'doctor', 'Diagnose LeanMac', 'Secure Input · services · displays · shortcuts', C.diagnose)
-    add(choices, actions, 'windows', 'Search windows', '⌃⌥⌘W · exact window picker', function() leanmac.picker.start(false, false) end)
-    add(choices, actions, 'layouts', 'Window layouts', '⌥G · split pairs, zoom, resize and reset', function() leanmac.groups.show() end)
-    add(choices, actions, 'overview', 'Workspace overview', '⌥O · drag windows and linked pairs between spaces', function() leanmac.overview.show() end)
-    add(choices, actions, 'pair', 'Pair with another window…', '⌥P · same-space window chooser', function() leanmac.groups.choose() end)
-    add(choices, actions, 'separate', 'Separate this window', '⌥⇧P · return to a standalone view', function() leanmac.groups.separate() end)
-    add(choices, actions, 'hs-reload', 'Reload Hammerspoon', '⌃⌥⌘R · reload utility config', hs.reload)
-    add(choices, actions, 'gather', 'Gather windows from extra macOS Desktops…', '⌃⌥⌘S · moves windows; does not delete Desktops', function()
-      if hs.dialog.blockAlert('Gather windows?', 'Move windows from extra native Desktops onto the current Desktop on each display?', 'Gather', 'Cancel') == 'Gather' then
-        leanmac.spaces.collapseNow()
-      end
+    add(choices, actions, 'doctor', 'Diagnose Hangar', 'Secure Input · services · displays · shortcuts', C.diagnose)
+    add(choices, actions, 'windows', 'Search windows', U.label('picker_search') .. ' · exact window picker', function() leanmac.picker.start(false, false) end)
+    add(choices, actions, 'layouts', 'Window layouts', U.label('layout_menu') .. ' · split pairs, zoom, resize and reset', function() leanmac.groups.show() end)
+    add(choices, actions, 'overview', 'Workspace overview', U.label('overview') .. ' · drag windows and linked pairs between spaces', function() leanmac.overview.show() end)
+    add(choices, actions, 'pair', 'Pair with another window…', U.label('pair') .. ' · same-space window chooser', function() leanmac.groups.choose() end)
+    add(choices, actions, 'separate', 'Separate this window', U.label('separate') .. ' · return to a standalone view', function() leanmac.groups.separate() end)
+    add(choices, actions, 'hs-reload', 'Reload Hammerspoon', U.label('reload') .. ' · reload utility config', hs.reload)
+    add(choices, actions, 'gather', 'Gather windows from extra macOS Desktops…', U.label('gather') .. ' · moves windows; does not delete Desktops', function()
+      leanmac.spaces.collapseNow()
     end)
     for _, zone in ipairs({'left', 'right', 'up', 'down'}) do
       local z = zone
       local names = {left = 'Snap left half', right = 'Snap right half', up = 'Snap full display', down = 'Restore pre-snap frame'}
-      add(choices, actions, 'snap-' .. z, names[z], '⌥ ' .. z .. ' arrow', function() leanmac.snap.apply(hs.window.focusedWindow(), z) end)
+      add(choices, actions, 'snap-' .. z, names[z], U.label('snap_' .. z), function() leanmac.snap.apply(hs.window.focusedWindow(), z) end)
     end
     local keys = {}
     for key in pairs(bindings) do table.insert(keys, key) end
@@ -110,11 +109,11 @@ end
 C.chooser = hs.chooser.new(function(choice)
   local origin, action = C.origin, choice and C.visibleActions[choice.id]
   hs.timer.doAfter(0.12, function() restoreOrigin(origin, action or function() end) end)
-end):rows(12):width(65):searchSubText(true):placeholderText('LeanMac · search a command or shortcut')
+end):rows(12):width(65):searchSubText(true):placeholderText('Hangar · search a command or shortcut')
 C.reportChooser = hs.chooser.new(function()
   local origin = C.origin
   hs.timer.doAfter(0.12, function() restoreOrigin(origin, function() end) end)
-end):rows(12):width(70):searchSubText(true):placeholderText('LeanMac doctor · read-only report · Escape to close')
+end):rows(12):width(70):searchSubText(true):placeholderText('Hangar doctor · read-only report · Escape to close')
 function C.diagnose()
   R.run(R.cli, {'doctor', '--json'}, function(_, out, err)
     local ok, report = pcall(hs.json.decode, out)
@@ -140,7 +139,7 @@ function C.show()
   C.chooser:query(''):choices(C.choices):show()
   C.refresh() -- refresh the next opening without moving rows under the user
 end
-C.hotkey = hs.hotkey.bind({'ctrl', 'alt', 'cmd'}, '/', C.show)
-assert(C.hotkey and C.hotkey.enabled, 'LeanMac palette shortcut could not be registered')
+C.hotkey = U.bind('palette', C.show)
+assert(C.hotkey and C.hotkey.enabled, 'Hangar palette shortcut could not be registered')
 C.refresh()
 return C

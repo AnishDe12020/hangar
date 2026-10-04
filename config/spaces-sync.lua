@@ -1,14 +1,15 @@
+local U = require('hangar-config')
 -- AeroSpace hides inactive workspaces off-screen. Extra macOS Spaces desync that.
--- Keep one user Space per connected display; collapse leftovers after unplug or swipe.
+-- Gathering is an explicit, confirmed action; loading this module is read-only.
 local M = {}
 local cli = hs.fs.attributes('/opt/homebrew/bin/aerospace') and '/opt/homebrew/bin/aerospace' or '/usr/local/bin/aerospace'
-local collapsing, warned = false, false
+local collapsing = false
 M.tasks = {}
 local function aero(args)
   local task
   task = hs.task.new(cli, function(code, out, err)
     M.tasks[task] = nil
-    if code ~= 0 then hs.printf('LeanMac spaces: %s', err or out) end
+    if code ~= 0 then hs.printf('Hangar spaces: %s', err or out) end
   end, args)
   if task then M.tasks[task] = true; task:start() end
 end
@@ -75,20 +76,16 @@ end
 function M.report()
   local n = extraCount()
   if n > 0 then
-    hs.alert.show(n .. ' extra macOS Desktop(s). ⌃⌥⌘S gathers windows onto this one; delete extras in Mission Control')
+    hs.alert.show(n .. ' extra macOS Desktop(s). ' .. U.label('gather') .. ' gathers windows onto this one; delete extras in Mission Control')
   end
   return n
 end
 function M.collapseNow()
   local n = extraCount()
   if n == 0 then hs.alert.show('Already one macOS Desktop per display'); return end
+  if hs.dialog.blockAlert('Gather windows?', 'Move windows from extra native Desktops onto the current Desktop on each display? This does not delete Desktops.', 'Gather', 'Cancel') ~= 'Gather' then return end
   if M.collapse() then hs.alert.show('Moved windows onto this Desktop. Delete leftover Desktops in Mission Control') else hs.alert.show('Could not gather windows') end
 end
-local function schedule()
-  if M.timer then M.timer:stop() end
-  M.timer = hs.timer.doAfter(1.0, M.report)
-end
-hs.execute('/usr/bin/defaults write com.apple.dock mru-spaces -bool false')
 -- Do not watch Space changes: Mission Control APIs can hitch WindowServer.
-M.hotkey = hs.hotkey.bind({'ctrl', 'alt', 'cmd'}, 's', M.collapseNow)
+M.hotkey = U.bind('gather', M.collapseNow)
 return M

@@ -43,7 +43,7 @@ private func aerospacePath() -> String? {
 
 private func runAeroSpace(_ commands: [[String]]) {
     guard let executable = aerospacePath() else {
-        NSLog("LeanMac hotkeys: aerospace CLI not found")
+        NSLog("Hangar hotkeys: aerospace CLI not found")
         return
     }
     commandQueue.async {
@@ -57,11 +57,11 @@ private func runAeroSpace(_ commands: [[String]]) {
                 try process.run()
                 process.waitUntilExit()
                 if process.terminationStatus != 0 {
-                    NSLog("LeanMac hotkeys: aerospace %@ failed (%d)", arguments.joined(separator: " "), process.terminationStatus)
+                    NSLog("Hangar hotkeys: aerospace %@ failed (%d)", arguments.joined(separator: " "), process.terminationStatus)
                     break
                 }
             } catch {
-                NSLog("LeanMac hotkeys: failed to launch aerospace: %@", error.localizedDescription)
+                NSLog("Hangar hotkeys: failed to launch aerospace: %@", error.localizedDescription)
                 break
             }
         }
@@ -210,7 +210,7 @@ private func registerHotKeys() -> Bool {
         &handler
     )
     guard handlerStatus == noErr else {
-        NSLog("LeanMac hotkeys: could not install Carbon handler (%d)", handlerStatus)
+        NSLog("Hangar hotkeys: could not install Carbon handler (%d)", handlerStatus)
         return false
     }
 
@@ -231,14 +231,14 @@ private func registerHotKeys() -> Bool {
             hotKeyRefs.append(ref)
         } else {
             allRegistered = false
-            NSLog("LeanMac hotkeys: registration %u failed (%d)", binding.id, status)
+            NSLog("Hangar hotkeys: registration %u failed (%d)", binding.id, status)
         }
     }
     return allRegistered
 }
 
 guard registerHotKeys() else {
-    NSLog("LeanMac hotkeys: one or more bindings are unavailable")
+    NSLog("Hangar hotkeys: one or more bindings are unavailable")
     exit(2)
 }
 

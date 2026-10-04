@@ -76,6 +76,7 @@ env.require = function(name)
   return realRequire(name)
 end
 setmetatable(env, {__index = _G})
+HANGAR_TEST_CONFIGURE(env)
 local P = assert(loadfile(KIT .. '/config/window-picker.lua', 't', env))()
 
 local function w(id)

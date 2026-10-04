@@ -139,7 +139,7 @@ final class Board: NSObject, NSWindowDelegate, NSMenuDelegate {
         let args=CommandLine.arguments.dropFirst().compactMap(Double.init)
         let f=args.count==4 ? NSRect(x:args[0],y:(NSScreen.screens.first?.frame.maxY ?? 900)-args[1]-args[3],width:args[2],height:args[3]) : NSRect(x:100,y:100,width:1100,height:670)
         panel=Panel(contentRect:f,styleMask:[.titled,.closable,.resizable,.utilityWindow],backing:.buffered,defer:false)
-        panel.title="LeanMac Spaces";panel.titleVisibility = .hidden;panel.titlebarAppearsTransparent=true
+        panel.title="Hangar Spaces";panel.titleVisibility = .hidden;panel.titlebarAppearsTransparent=true
         panel.minSize=NSSize(width:820,height:470);panel.level = .floating;panel.hidesOnDeactivate=false
         panel.isReleasedWhenClosed=false;panel.delegate=self
         let effect=NSVisualEffectView(frame:NSRect(origin:.zero,size:f.size));effect.material = .popover;effect.blendingMode = .behindWindow;effect.state = .active
@@ -162,7 +162,7 @@ final class Board: NSObject, NSWindowDelegate, NSMenuDelegate {
         root.subviews.forEach{$0.removeFromSuperview()};actions=[]
         let width=root.bounds.width,height=root.bounds.height
         let heading=label("Spaces",size:22);heading.font = .systemFont(ofSize:22,weight:.semibold);heading.frame=NSRect(x:24,y:12,width:150,height:30);root.addSubview(heading)
-        let hint=label("⌥O   ·   Drag to move or pair   ·   Right-click for actions",size:11,color:.secondaryLabelColor);hint.frame=NSRect(x:180,y:23,width:width-310,height:20);root.addSubview(hint)
+        let hint=label("Drag to move or pair   ·   Right-click for actions",size:11,color:.secondaryLabelColor);hint.frame=NSRect(x:180,y:23,width:width-310,height:20);root.addSubview(hint)
         root.addSubview(button("Refresh",frame:NSRect(x:width-98,y:13,width:78,height:28)){self.send("refresh")})
         let n=max(1,spaces.count),gap:CGFloat=12,margin:CGFloat=20
         let col=(width-margin*2-gap*CGFloat(n-1))/CGFloat(n)

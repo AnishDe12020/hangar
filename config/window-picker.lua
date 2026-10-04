@@ -1,3 +1,4 @@
+local U = require('hangar-config')
 -- Cached exact-window switcher with a native AppKit presentation.
 local P = {active = false, generation = 0}
 local cli = hs.fs.attributes('/opt/homebrew/bin/aerospace') and '/opt/homebrew/bin/aerospace' or '/usr/local/bin/aerospace'
@@ -556,5 +557,5 @@ P.refresh()
 P.subscribe()
 P.forward = hs.hotkey.bind({'alt'}, 'tab', function() P.start(true, false) end)
 P.backward = hs.hotkey.bind({'alt','shift'}, 'tab', function() P.start(true, true) end)
-P.search = hs.hotkey.bind({'ctrl','alt','cmd'}, 'w', function() P.start(false, false) end)
+P.search = U.bind('picker_search', function() P.start(false, false) end)
 return P

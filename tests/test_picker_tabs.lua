@@ -1,5 +1,5 @@
 -- Execute with Lua 5.4 (or the bundled LuaSkin runner below). No live app calls.
-local object = {}
+local object = {enabled=true}
 setmetatable(object, {__index = function() return function(self) return self end end})
 local linksEnv = {hs = {settings = {get = function() return {} end, set = function() end}}}
 setmetatable(linksEnv, {__index = _G})
@@ -18,6 +18,7 @@ env.require = function(name)
   return realRequire(name)
 end
 setmetatable(env, {__index = _G})
+HANGAR_TEST_CONFIGURE(env)
 local P = assert(loadfile(KIT .. '/config/window-picker.lua', 't', env))()
 local function row(id, pid, bundle)
   return {['window-id']=id, ['app-pid']=pid or 12, ['app-bundle-id']=bundle or 'com.mitchellh.ghostty',

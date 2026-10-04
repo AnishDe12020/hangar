@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hangar Configuration"
+  short_description: "Edit portable Hangar preferences and dotfiles"
+  default_prompt: "Use $hangar-config to customize my Hangar workspace settings and validate the changes."

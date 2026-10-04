@@ -9,5 +9,5 @@ for leanmac_python in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/
     exec "$leanmac_python" "$leanmac_bin_dir/../lib/leanmac/leanmac.py" "$@"
   fi
 done
-echo 'LeanMac needs Python 3.11 or later. Run: brew install python' >&2
+echo 'Hangar needs Python 3.11 or later. Run: brew install python' >&2
 exit 2

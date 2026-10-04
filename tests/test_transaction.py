@@ -1,8 +1,10 @@
 """Failure injection uses temporary paths and fake services; never the live Mac."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -20,7 +22,7 @@ class Transactions(unittest.TestCase):
         self.user = self.root / 'user'
         self.user.mkdir()
         self.kit = self.root / 'kit'
-        shutil.copytree(KIT, self.kit, ignore=shutil.ignore_patterns('__pycache__'))
+        shutil.copytree(KIT, self.kit, ignore=shutil.ignore_patterns('__pycache__', '.git', 'dist', 'work'))
         self.state = self.user / 'Library/Application Support/LeanMac'
         self.hs = self.user / '.hammerspoon'
         self.hs.mkdir()
@@ -29,7 +31,7 @@ class Transactions(unittest.TestCase):
         self.init = self.hs / 'init.lua'
         self.init.write_text('-- unrelated user customization\nuserSetting = 42\n')
         self.patches = [patch.object(lm, 'USER_DIR', self.user), patch.object(lm, 'STATE', self.state),
-            patch.object(lm, 'CONFIG', self.config), patch.object(lm, 'HS_DIR', self.hs),
+            patch.object(lm, 'user_config_dir', lambda: self.user / '.config/hangar'), patch.object(lm, 'CONFIG', self.config), patch.object(lm, 'HS_DIR', self.hs),
             patch.object(lm, 'run', self.fake_run), patch.object(lm, 'runtime_check'),
             patch.object(lm.time, 'sleep'), patch.object(lm, 'reload_previous', return_value=[])]
         for p in self.patches:
@@ -59,6 +61,18 @@ class Transactions(unittest.TestCase):
 
     def manifests(self):
         return [json.loads(p.read_text()) for p in (self.state / 'backup').glob('*/manifest.json')]
+
+    def test_installed_cli_requires_source_instead_of_assuming_icloud(self):
+        with patch.object(lm, '__file__', str(self.user / '.local/lib/leanmac/leanmac.py')):
+            self.assertIsNone(lm.default_kit())
+        with self.assertRaisesRegex(RuntimeError, 'No source kit found'):
+            lm.install(None)
+        self.assertFalse(self.state.exists())
+
+    def test_check_does_not_create_persistent_state(self):
+        lm.install(self.kit, check_only=True)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.config.read_bytes(), b'old config bytes\n')
 
     def test_compile_failure_never_touches_live_files(self):
         self.fail_on = 'swiftc'
@@ -96,8 +110,8 @@ class Transactions(unittest.TestCase):
         config = lm.validate_config(self.kit / 'config/aerospace-numbered-study.toml')
         keys = config['mode']['main']['binding']
         self.assertEqual(config['default-root-container-orientation'], 'vertical')
-        self.assertEqual(keys['alt-slash'], 'layout tiles')
-        self.assertEqual(keys['alt-shift-slash'], 'layout accordion')
+        self.assertEqual(keys['alt-slash'], 'layout h_tiles')
+        self.assertEqual(keys['alt-shift-slash'], 'layout v_accordion')
         self.assertFalse(any('flatten-workspace-tree' in str(v) for v in keys.values()))
         self.assertEqual(keys['alt-f'], 'fullscreen')
 
@@ -153,6 +167,88 @@ class Transactions(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), b'old config bytes\n')
         self.assertFalse((self.user / '.local/bin/leanmac').exists())
         self.assertTrue(any(m['status'] == 'saved' for m in self.manifests()))
+
+    def test_apply_compiles_persistent_settings_and_rollback_leaves_desired_sources(self):
+        directory = self.user / '.config/hangar'
+        directory.mkdir(parents=True)
+        source = directory / 'settings.toml'
+        source.write_text('schema = 1\n[apps]\nterminal = "Custom Terminal"\n[hotkeys]\noverview = "ctrl-alt-o"\n')
+        before = source.read_bytes()
+        lm.install(self.kit)
+        generated = self.hs / 'hangar-settings.lua'
+        self.assertIn('Custom Terminal', generated.read_text())
+        self.assertIn('["mods"]={"ctrl","alt"}', generated.read_text())
+        self.assertTrue((self.hs / 'hangar-config.lua').exists())
+        lm.rollback('last')
+        self.assertFalse(generated.exists())
+        self.assertFalse((self.hs / 'hangar-config.lua').exists())
+        self.assertEqual(source.read_bytes(), before)
+
+    def test_xdg_duplicate_rollback_survives_environment_change(self):
+        # External XDG roots and symlink duplicates are supported without touching
+        # the symlink target. Rescue backups must retain the location too.
+        duplicate = self.root / 'external-config/aerospace/aerospace.toml'
+        duplicate.parent.mkdir(parents=True)
+        source = self.root / 'original.toml'
+        source.write_text('original duplicate')
+        duplicate.symlink_to(source)
+        with patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.root / 'external-config')}):
+            lm.install(self.kit)
+        self.assertFalse(duplicate.exists())
+        self.assertEqual(source.read_text(), 'original duplicate')
+        with patch.dict(os.environ, {'XDG_CONFIG_HOME': ''}):
+            self.assertEqual(lm.xdg_config_root(), self.user / '.config')
+            lm.rollback('last')
+        self.assertTrue(duplicate.is_symlink())
+        self.assertEqual(duplicate.read_text(), 'original duplicate')
+        rescue = next(p.parent for p in (self.state / 'backup').glob('*/manifest.json')
+                      if json.loads(p.read_text()).get('status') == 'saved')
+        with patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.root / 'different')}):
+            lm.rollback(rescue.name)
+        self.assertFalse(duplicate.exists())
+        self.assertEqual(source.read_text(), 'original duplicate')
+
+    def test_upgrade_reuses_legacy_profile_and_restores_old_cli(self):
+        self.state.mkdir(parents=True)
+        (self.state / 'aerospace-profile').write_text('numbered-study\n')
+        old_cli = self.user / '.local/bin/leanmac'
+        old_core = self.user / '.local/lib/leanmac/leanmac.py'
+        old_cli.parent.mkdir(parents=True)
+        old_core.parent.mkdir(parents=True)
+        old_cli.write_text('#!/bin/bash\necho legacy\n')
+        old_cli.chmod(0o755)
+        old_core.write_text('# legacy core\n')
+        self.init.write_text('userSetting = 42\nleanmac = require("leanmac")\n')
+        legacy_backup = lm.new_backup('legacy')
+        lm.save_manifest(legacy_backup, {'schema': 1, 'status': 'committed',
+            'files': lm.snapshot_files(legacy_backup, [self.config, old_cli, old_core])})
+        original_manifest = (legacy_backup / 'manifest.json').read_bytes()
+        lm.install(self.kit)
+        installed_backup = (self.state / 'last-install').read_text()
+        self.assertEqual((legacy_backup / 'manifest.json').read_bytes(), original_manifest)
+        self.assertEqual(lm.selected_profile(), 'numbered-study')
+        self.assertEqual(self.init.read_text().count('require("leanmac")'), 1)
+        for command in ['hangar', 'leanmac']:
+            binary = self.user / '.local/bin' / command
+            self.assertEqual(binary.stat().st_mode & 0o777, 0o755)
+            result = subprocess.run([str(binary), '--help'], capture_output=True, text=True, check=True)
+            self.assertIn('usage: hangar', result.stdout)
+            self.assertIn('Hangar diagnostics', result.stdout)
+        lm.rollback(installed_backup)
+        self.assertEqual(old_cli.read_text(), '#!/bin/bash\necho legacy\n')
+        self.assertEqual(old_core.read_text(), '# legacy core\n')
+        self.assertFalse((self.user / '.local/bin/hangar').exists())
+        self.assertEqual(lm.selected_profile(), 'numbered-study')
+        lm.rollback(legacy_backup.name)  # old schema/targets remain accepted
+        self.assertEqual(self.config.read_bytes(), b'old config bytes\n')
+
+    def test_legacy_manifest_still_discovers_source_kit(self):
+        self.state.mkdir(parents=True)
+        backup = lm.new_backup('legacy')
+        lm.save_manifest(backup, {'schema': 1, 'kit': str(self.kit)})
+        (self.state / 'last-install').write_text(backup.name)
+        with patch.object(lm, '__file__', str(self.user / '.local/lib/leanmac/leanmac.py')):
+            self.assertEqual(lm.default_kit(), self.kit)
 
     def test_profile_choice_is_local(self):
         self.state.mkdir(parents=True)

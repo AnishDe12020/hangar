@@ -134,6 +134,7 @@ local env={hs={
 end, leanmac={picker={byID={},cache={},refresh=function() end},
   overview={scheduleRefresh=function() board.refreshes=board.refreshes+1 end}}}
 setmetatable(env,{__index=_G})
+HANGAR_TEST_CONFIGURE(env)
 local G=assert(loadfile(KIT..'/config/window-groups.lua','t',env))()
 local a={id=1,pid=101,workspace='1',monitor='main'}
 local b={id=2,pid=102,workspace='1',monitor='main'}

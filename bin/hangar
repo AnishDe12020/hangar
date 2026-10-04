@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+for hangar_python in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+  if [ -x "$hangar_python" ] && "$hangar_python" -c 'import tomllib' 2>/dev/null; then
+    hangar_bin_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+    if [ -f "$hangar_bin_dir/../tools/leanmac.py" ]; then
+      exec "$hangar_python" "$hangar_bin_dir/../tools/leanmac.py" "$@"
+    fi
+    exec "$hangar_python" "$hangar_bin_dir/../lib/leanmac/leanmac.py" "$@"
+  fi
+done
+echo 'Hangar needs Python 3.11 or later. Run: brew install python' >&2
+exit 2
