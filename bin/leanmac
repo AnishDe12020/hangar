@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+for leanmac_python in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+  if [ -x "$leanmac_python" ] && "$leanmac_python" -c 'import tomllib' 2>/dev/null; then
+    leanmac_bin_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+    if [ -f "$leanmac_bin_dir/../tools/leanmac.py" ]; then
+      exec "$leanmac_python" "$leanmac_bin_dir/../tools/leanmac.py" "$@"
+    fi
+    exec "$leanmac_python" "$leanmac_bin_dir/../lib/leanmac/leanmac.py" "$@"
+  fi
+done
+echo 'LeanMac needs Python 3.11 or later. Run: brew install python' >&2
+exit 2

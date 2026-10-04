@@ -1,0 +1,93 @@
+config-version = 2
+start-at-login = true
+auto-reload-config = true
+default-root-container-layout = 'accordion'
+default-root-container-orientation = 'vertical'
+accordion-padding = 20
+persistent-workspaces = ['1','2','3','4']
+on-focused-monitor-changed = ['move-mouse monitor-lazy-center']
+
+# AeroSpace workspaces are off-screen hides, not extra macOS Desktops.
+# Keep one macOS Space per display; Hammerspoon collapses leftovers after unplug.
+
+# New routed windows leave any current horizontal split and start as standalone views.
+# Pairing is explicit (Hammerspoon: Option+P); layout shortcuts never flatten groups.
+# Put the specific Study matches before the general Zed/Aside rules.
+# Window titles are best-effort: some apps set or change them after detection.
+on-window-detected = [
+  { if = 'test %{app-bundle-id} = local.leanmac.picker', run = 'layout floating' },
+  { if = 'test %{app-bundle-id} = dev.zed.Zed && test %{window-title} ~= "study|coursework"', run = ['move-node-to-workspace 2', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = at.studio.AsideBrowser && test %{window-title} ~= "study|lecture|assignment|college"', run = ['move-node-to-workspace 2', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = at.studio.AsideBrowser && test %{window-title} ~= "slides|Math"', run = ['move-node-to-workspace 2', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = md.obsidian', run = ['move-node-to-workspace 2', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+
+  { if = 'test %{app-bundle-id} = com.openai.codex', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = ai.opencode.desktop', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = com.openai.chat', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = com.anthropic.claudefordesktop', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = com.apple.Terminal', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = com.googlecode.iterm2', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = dev.warp.Warp-Stable', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = com.todesktop.230313mzl4w4u92', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = dev.zed.Zed', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = at.studio.AsideBrowser', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = com.google.Chrome || test %{app-bundle-id} = company.thebrowser.dia || test %{app-bundle-id} = com.brave.Browser || test %{app-bundle-id} = com.apple.Safari', run = ['move-node-to-workspace 1', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+
+  { if = 'test %{app-bundle-id} = com.tinyspeck.slackmacgap || test %{app-bundle-id} = com.hnc.Discord || test %{app-bundle-id} = ru.keepcoder.Telegram || test %{app-bundle-id} = net.whatsapp.WhatsApp', run = ['move-node-to-workspace 3', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = com.apple.MobileSMS', run = ['move-node-to-workspace 3', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+
+  { if = 'test %{app-bundle-id} = com.spotify.client || test %{app-bundle-id} = org.videolan.vlc || test %{app-bundle-id} = com.firecore.infuse || test %{app-bundle-id} = com.amazon.aiv.AIVApp', run = ['move-node-to-workspace 4', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = com.apple.iCal || test %{app-bundle-id} = com.apple.finder', run = ['move-node-to-workspace 4', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = notion.id', run = ['move-node-to-workspace 4', 'test %{window-parent-container-layout} = h_tiles && move up && layout --root v_accordion || true'] },
+  { if = 'test %{app-bundle-id} = com.apple.systempreferences || test %{app-bundle-id} = com.apple.ActivityMonitor || test %{app-bundle-id} = com.1password.1password', run = ['move-node-to-workspace 4', 'layout floating'] },
+  { if = 'test %{app-bundle-id} = cc.ffitch.shottr || test %{app-bundle-id} = org.hammerspoon.Hammerspoon || test %{app-bundle-id} = com.stonerl.Thaw', run = 'layout floating' }
+]
+
+[gaps]
+inner.horizontal = 8
+inner.vertical = 8
+outer.left = 8
+outer.right = 8
+outer.top = 8
+outer.bottom = 8
+
+[workspace-to-monitor-force-assignment]
+1 = 'main'
+2 = 'main'
+3 = ['secondary','main']
+4 = ['secondary','main']
+
+[mode.main.binding]
+alt-h = 'focus left'
+alt-j = 'focus down'
+alt-k = 'focus up'
+alt-l = 'focus right'
+alt-shift-h = 'move left'
+alt-shift-j = 'move down'
+alt-shift-k = 'move up'
+alt-shift-l = 'move right'
+alt-1 = 'workspace 1'
+alt-2 = 'workspace 2'
+alt-3 = 'workspace 3'
+alt-4 = 'workspace 4'
+alt-shift-1 = 'move-node-to-workspace 1'
+alt-shift-2 = 'move-node-to-workspace 2'
+alt-shift-3 = 'move-node-to-workspace 3'
+alt-shift-4 = 'move-node-to-workspace 4'
+alt-backtick = 'workspace-back-and-forth'
+alt-comma = 'focus-monitor --wrap-around prev'
+alt-period = 'focus-monitor --wrap-around next'
+alt-shift-comma = 'move-node-to-monitor --focus-follows-window --wrap-around prev'
+alt-shift-period = 'move-node-to-monitor --focus-follows-window --wrap-around next'
+alt-f = 'fullscreen'
+alt-shift-space = 'layout floating tiling'
+alt-slash = 'layout h_tiles'
+alt-shift-slash = 'layout v_accordion'
+alt-minus = 'resize smart -50'
+alt-equal = 'resize smart +50'
+alt-shift-equal = 'balance-sizes'
+alt-shift-r = 'reload-config'
+f18 = 'workspace --wrap-around prev'
+f19 = 'workspace --wrap-around next'
