@@ -36,3 +36,7 @@ In **numbered-study**, ⌥/ means side-by-side (`h_tiles`), and ⌥⇧/ means th
 In the overview, click a card to focus its exact window. Drag it to another column to move it, or onto another window to pair. Drag the linked-pair handle to move both. Right-click for Move, Pair, Swap, or Separate. Swap resets custom split proportions.
 
 Snapping floats a window, taking it out of a tiled pair. Use ⌥P to pair it again. Pairing and moving can briefly change the focused workspace while AeroSpace reconstructs the two selected windows.
+
+In Apron, ⌘F finds shelf items, ⇧⌘C copies the selected text/image/link contents, ⌘C copies items, Space opens Quick Look, Return opens an item, and Delete removes references. Escape clears the search before closing it. Quick Tools and Share are in the item menu.
+
+Keep-awake, focus timers and quick reminders are available from the Hangar menu and command palette without adding more global shortcuts. Open Ground Control → Sessions for their full controls.

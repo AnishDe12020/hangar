@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "reviewed_on": "2026-10-04",
+  "reviewed_on": "2026-10-05",
   "utilities": [
     {
       "id": "tinycast",
@@ -166,6 +166,28 @@
         "https://github.com/exelban/stats/blob/master/LICENSE",
         "https://formulae.brew.sh/cask/stats",
         "https://github.com/Homebrew/homebrew-cask/blob/master/Casks/s/stats.rb"
+      ]
+    },
+    {
+      "id": "mole",
+      "name": "Mole",
+      "summary": "Optional terminal toolkit for Mac maintenance; Hangar opens its live status dashboard only.",
+      "category": "System tools",
+      "homepage": "https://github.com/tw93/Mole",
+      "install_url": "https://github.com/tw93/Mole#quick-start",
+      "license": "GPL-3.0",
+      "pricing": "Free and open-source CLI; native Mole app is a separate product",
+      "minimum_macos": "12.0",
+      "minimum_install_macos": "12.0",
+      "architectures": [
+        "arm64",
+        "x86_64"
+      ],
+      "notes": "Installs the mo command via a Homebrew formula. Hangar opens only mo status in Terminal. Mole also has destructive cleanup and optimization commands; these are not exposed here. Its disk analyzer can move selected files to Trash after confirmation. Existing installations are preserved without upgrade.",
+      "sources": [
+        "https://github.com/tw93/Mole",
+        "https://github.com/tw93/Mole/blob/main/LICENSE",
+        "https://formulae.brew.sh/api/formula/mole.json"
       ]
     }
   ]

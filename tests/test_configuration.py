@@ -1,9 +1,13 @@
 """Portable desired settings are validated without touching an active desktop."""
 import importlib.util
+import contextlib
+import ctypes
+import io
 import os
 from pathlib import Path
 import shutil
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -32,6 +36,17 @@ class Configuration(unittest.TestCase):
     def write(self, text, name='settings.toml'):
         self.config.mkdir(parents=True, exist_ok=True)
         (self.config / name).write_text(text)
+
+    def test_portable_doctor_cli_does_not_expose_raw_diagnostics(self):
+        report = {'version': lm.VERSION, 'ok': False, 'warnings': 0,
+                  'machine': 'private-host', 'checks': [{'name': 'settings-helper', 'status': 'fail', 'message': '/private/secret'}]}
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['hangar', 'doctor', '--portable']), patch.object(lm, 'doctor', return_value=report), patch.object(sys, 'path', [str(KIT / 'tools'), *sys.path]), contextlib.redirect_stdout(output):
+            self.assertEqual(lm.main(), 2)
+        import json
+        exported = json.loads(output.getvalue())
+        self.assertEqual(exported['checks'], [{'id': 'settings-helper', 'status': 'fail'}])
+        self.assertNotIn('private', output.getvalue())
 
     def test_legacy_defaults_survive_until_deliberate_init(self):
         self.state.mkdir()
@@ -130,3 +145,50 @@ class Configuration(unittest.TestCase):
             source = Path(directory) / 'generated.lua'
             source.write_text(generated)
             lm.validate_lua([source])
+
+
+class UtilityCLI(unittest.TestCase):
+    def run_lua(self, source):
+        """Execute the emitted IPC chunk against inert Lua utility endpoints."""
+        lib = ctypes.CDLL(str(lm.HS_APP / 'Contents/Frameworks/LuaSkin.framework/LuaSkin'))
+        lib.luaL_newstate.restype = ctypes.c_void_p
+        for name, types in [('luaL_openlibs', [ctypes.c_void_p]),
+                            ('luaL_loadstring', [ctypes.c_void_p, ctypes.c_char_p]),
+                            ('lua_pcallk', [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ssize_t, ctypes.c_void_p]),
+                            ('lua_tolstring', [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]),
+                            ('lua_close', [ctypes.c_void_p])]:
+            getattr(lib, name).argtypes = types
+        lib.lua_tolstring.restype = ctypes.c_char_p
+        state = lib.luaL_newstate()
+        try:
+            lib.luaL_openlibs(state)
+            code = lib.luaL_loadstring(state, source.encode()) or lib.lua_pcallk(state, 0, 0, 0, 0, None)
+            self.assertEqual(code, 0, lib.lua_tolstring(state, -1, None).decode() if code else '')
+        finally:
+            lib.lua_close(state)
+
+    def cli(self, args, endpoint):
+        def fake_ipc(argv, **kwargs):
+            self.assertEqual(argv[:4], [lm.HS, '-t', '3', '-c'])
+            self.run_lua("local called=false; hs={json={encode=function() return '{}' end}}; print=function() end; "
+                         + endpoint + '; ' + argv[4] + '; assert(called,"endpoint was not called")')
+            return 0, 'HANGAR_REPLY:{"ok":true}', ''
+        with patch.object(sys, 'argv', ['hangar', *args, '--json']), patch.object(lm, 'run', side_effect=fake_ipc), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(lm.main(), 0)
+
+    def test_focus_cli_passes_numeric_options_to_real_lua(self):
+        self.cli(['focus', 'start', '--minutes', '45', '--break-minutes', '10', '--long-break-minutes', '20'],
+                 'leanmac={sessions={startFocus=function(v) assert(v.focusMinutes==45 and v.breakMinutes==10 and v.longBreakMinutes==20); called=true; return {} end}}')
+
+    def test_invalid_utility_inputs_never_reach_ipc(self):
+        for args in [['focus', 'start', '--minutes', '0'], ['hold', 'start', '--minutes', '1441'],
+                     ['remind', 'add', 'line\nbreak', '--minutes', '1'], ['remind', 'add', 'Later', '--minutes', '10081']]:
+            with self.subTest(args=args), patch.object(sys, 'argv', ['hangar', *args]), patch.object(lm, 'run') as ipc, contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(lm.main(), 2)
+                ipc.assert_not_called()
+
+    def test_reminder_cli_preserves_quotes_backslashes_and_unicode_without_execution(self):
+        text = 'Call "Jo" \\ ); os.execute("unexpected") -- 🛫'
+        self.cli(['remind', 'add', text, '--minutes', '15'],
+                 'os.execute=function() error("injected command ran") end; leanmac={sessions={add=function(text,minutes) '
+                 'assert(text==[=[' + text + ']=] and minutes==15); called=true; return {} end}}')

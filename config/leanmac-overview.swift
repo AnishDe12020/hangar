@@ -30,6 +30,15 @@ final class Action: NSObject {
     init(_ run: @escaping () -> Void) { self.run = run }
     @objc func invoke(_ sender: Any?) { run() }
 }
+let overviewStyle: NSWindow.StyleMask = [.titled, .closable, .resizable, .utilityWindow]
+func fitOverviewContent(_ requested: NSRect, inside available: NSRect) -> NSRect {
+    // visibleFrame constrains the complete window, including the native titlebar.
+    var frame = NSWindow.frameRect(forContentRect: requested, styleMask: overviewStyle)
+    frame.size.width = min(frame.width, available.width); frame.size.height = min(frame.height, available.height)
+    frame.origin.x = min(max(frame.minX, available.minX), available.maxX - frame.width)
+    frame.origin.y = min(max(frame.minY, available.minY), available.maxY - frame.height)
+    return NSWindow.contentRect(forFrameRect: frame, styleMask: overviewStyle)
+}
 final class Panel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -230,11 +239,9 @@ final class Board: NSObject, NSWindowDelegate, NSMenuDelegate {
         if previewMode && CommandLine.arguments.contains("--compact") { f.size=NSSize(width:720,height:520) }
         if !previewMode, let screen = NSScreen.screens.first(where: { $0.frame.intersects(f) }) ?? NSScreen.main {
             let area = screen.visibleFrame.insetBy(dx: 20, dy: 20)
-            f.size.width = min(f.width, area.width); f.size.height = min(f.height, area.height)
-            f.origin.x = min(max(f.minX, area.minX), area.maxX-f.width)
-            f.origin.y = min(max(f.minY, area.minY), area.maxY-f.height)
+            f = fitOverviewContent(f, inside: area)
         }
-        panel=Panel(contentRect:f,styleMask:[.titled,.closable,.resizable,.utilityWindow],backing:.buffered,defer:false)
+        panel=Panel(contentRect:f,styleMask:overviewStyle,backing:.buffered,defer:false)
         panel.title="Tower — Workspace overview";panel.titleVisibility = .hidden;panel.titlebarAppearsTransparent=true
         panel.minSize=NSSize(width:min(680, f.width),height:min(450, f.height));panel.animationBehavior = .none;panel.level = .floating;panel.hidesOnDeactivate=false
         panel.isReleasedWhenClosed=false;panel.delegate=self
@@ -506,6 +513,16 @@ if CommandLine.arguments.contains("--self-test") {
     check(board.windowTiles.allSatisfy{$0.frame.width >= 220})
     board.step(from:board.windowTiles[0],delta:1)
     check(board.panel.firstResponder === board.windowTiles[1] && board.deckScroll!.contentView.bounds.origin.x > 0)
+    for area in [NSRect(x: 20, y: 20, width: 1240, height: 635), NSRect(x: -1900, y: 80, width: 1860, height: 1000), NSRect(x: 0, y: 0, width: 2560, height: 1400)] {
+        let content = fitOverviewContent(NSRect(x: 100, y: 100, width: 1100, height: 670), inside: area)
+        let frame = NSWindow.frameRect(forContentRect: content, styleMask: overviewStyle)
+        check(area.contains(frame))
+    }
+    for size in [NSSize(width: 680, height: 450), NSSize(width: 1800, height: 950)] {
+        board.root.frame.size = size; board.render()
+        check(board.deckScroll!.frame.maxY < size.height - 65)
+        check(board.windowTiles.allSatisfy { $0.frame.width >= 220 })
+    }
     print("\(checks) native overview menu/payload/keyboard/layout checks passed")
     exit(0)
 }

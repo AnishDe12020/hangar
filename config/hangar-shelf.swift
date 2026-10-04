@@ -2,6 +2,8 @@ import AppKit
 import Quartz
 import QuickLookThumbnailing
 import ImageIO
+import PDFKit
+import CryptoKit
 import UniformTypeIdentifiers
 import Darwin
 
@@ -145,6 +147,232 @@ final class ShelfStore {
     func renameGroup(_ name: String) throws { let index = groupIndex; try change { $0.groups[index].name = name } }
 }
 
+// Quick Tools only produce new files. No encoder ever receives an input URL as output.
+final class ToolCancellation {
+    private let lock = NSLock()
+    private var cancelled = false
+    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    func check() throws { lock.lock(); let value = cancelled; lock.unlock(); if value { throw CancellationError() } }
+}
+struct ToolResult { let url: URL; let detail: String }
+enum ShelfQuickTools {
+    static let maxInputBytes = 128 * 1024 * 1024
+    static let maxPDFPages = 300
+    static func validateDestination(_ output: URL, inputs: [URL]) throws {
+        guard output.isFileURL else { throw ShelfError.invalid("Choose a local destination for the new copy.") }
+        let resolved = output.standardizedFileURL.resolvingSymlinksInPath()
+        guard !inputs.contains(where: { $0.standardizedFileURL.resolvingSymlinksInPath() == resolved }) else {
+            throw ShelfError.invalid("Choose a different name or folder. Quick Tools never replace an original.")
+        }
+        var info = stat()
+        guard lstat(output.path, &info) != 0, errno == ENOENT else {
+            throw ShelfError.invalid("That destination already exists or cannot be checked. Choose a new filename; existing files and aliases are never replaced.")
+        }
+    }
+    static func saveNew(_ data: Data, to output: URL, inputs: [URL], cancel: ToolCancellation, didWriteChunk: (() -> Void)? = nil) throws {
+        try cancel.check(); try validateDestination(output, inputs: inputs)
+        guard data.count <= maxInputBytes else { throw ShelfError.invalid("The new copy exceeds the 128 MB Quick Tools limit.") }
+        // O_EXCL is the final race-safe no-overwrite check, including dangling symlinks.
+        let descriptor = open(output.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        guard descriptor >= 0 else { throw ShelfError.invalid("The new file could not be created. Choose a new name in a writable folder.") }
+        var complete = false, identity = stat(); _ = fstat(descriptor, &identity)
+        defer {
+            close(descriptor)
+            if !complete {
+                var current = stat()
+                if lstat(output.path, &current) == 0 && current.st_dev == identity.st_dev && current.st_ino == identity.st_ino { _ = unlink(output.path) }
+            }
+        }
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                try cancel.check()
+                let count = Darwin.write(descriptor, bytes.baseAddress!.advanced(by: offset), min(1024 * 1024, bytes.count - offset))
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { throw ShelfError.invalid("The copy could not be saved. Check free space and folder access.") }
+                offset += count; didWriteChunk?()
+            }
+        }
+        guard fsync(descriptor) == 0 else { throw ShelfError.invalid("The copy could not be saved completely. Check free space.") }
+        try cancel.check(); complete = true
+    }
+    static func runDitto(_ arguments: [String], cancel: ToolCancellation, log: URL, didLaunch: (() -> Void)? = nil) throws {
+        try cancel.check()
+        guard FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { throw ShelfError.invalid("Could not prepare the ZIP operation.") }
+        let errors = try FileHandle(forWritingTo: log); defer { try? errors.close() }
+        let process = Process(), ended = DispatchSemaphore(value: 0)
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto"); process.arguments = arguments
+        process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice; process.standardError = errors
+        process.terminationHandler = { _ in ended.signal() }
+        try process.run(); didLaunch?()
+        let deadline = ProcessInfo.processInfo.systemUptime + 60
+        do {
+            while ended.wait(timeout: .now() + 0.1) == .timedOut {
+                try cancel.check()
+                guard ProcessInfo.processInfo.systemUptime < deadline else { throw ShelfError.invalid("ZIP creation took longer than one minute. Try fewer or smaller files.") }
+            }
+            try cancel.check()
+        } catch {
+            if process.isRunning {
+                process.terminate()
+                if ended.wait(timeout: .now() + 2) == .timedOut, process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
+            }
+            process.waitUntilExit() // Worker cleanup and app quit wait until our child is gone.
+            throw error
+        }
+        guard process.terminationStatus == 0 else {
+            let handle = try? FileHandle(forReadingFrom: log)
+            let detail = handle.flatMap { try? $0.read(upToCount: 2048) }.map { String(decoding: $0, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+            try? handle?.close()
+            throw ShelfError.invalid("macOS could not create this ZIP." + (detail.isEmpty ? "" : "\n" + detail))
+        }
+    }
+    static func zipCopy(_ inputs: [URL], to output: URL, cancel: ToolCancellation, didLaunch: (() -> Void)? = nil) throws -> ToolResult {
+        guard !inputs.isEmpty, inputs.count <= 100, inputs.allSatisfy(\.isFileURL) else { throw ShelfError.invalid("Choose between 1 and 100 local files or folders for a ZIP.") }
+        try validateDestination(output, inputs: inputs); try cancel.check()
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("ApronZIP-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let staging = scratch.appendingPathComponent("Contents", isDirectory: true), archive = scratch.appendingPathComponent("archive.zip")
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
+        var bytes = 0, entries = 0, names = Set<String>()
+        let deadline = ProcessInfo.processInfo.systemUptime + 60
+        func stage(_ source: URL, at destination: URL, depth: Int) throws {
+            try cancel.check(); entries += 1
+            guard entries <= 4096, depth <= 32, ProcessInfo.processInfo.systemUptime < deadline else { throw ShelfError.invalid("ZIP creation is limited to 4096 entries, 32 folder levels and one minute of preparation. Choose a smaller selection.") }
+            var info = stat()
+            guard lstat(source.path, &info) == 0 else { throw ShelfError.invalid("\(source.lastPathComponent) is missing or cannot be read.") }
+            let kind = info.st_mode & S_IFMT
+            if kind == S_IFDIR {
+                let sourcePath = source.standardizedFileURL.resolvingSymlinksInPath().path + "/"
+                guard !output.standardizedFileURL.resolvingSymlinksInPath().path.hasPrefix(sourcePath) else { throw ShelfError.invalid("Save the ZIP outside the folders being archived.") }
+                try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+                var enumerationError: Error?
+                guard let children = FileManager.default.enumerator(at: source, includingPropertiesForKeys: nil, options: [.skipsSubdirectoryDescendants], errorHandler: { _, error in enumerationError = error; return false }) else { throw ShelfError.invalid("\(source.lastPathComponent) could not be read.") }
+                // One level at a time keeps depth/count/cancellation checks ahead of each read.
+                while let child = children.nextObject() as? URL { try stage(child, at: destination.appendingPathComponent(child.lastPathComponent), depth: depth + 1) }
+                // Enumeration failures must not silently create an incomplete archive.
+                if let error = enumerationError { throw error }
+            } else if kind == S_IFREG {
+                let data = try readBoundedFile(source, limit: maxInputBytes - bytes); try cancel.check(); bytes += data.count
+                try data.write(to: destination, options: .withoutOverwriting)
+                try FileManager.default.setAttributes([.posixPermissions: Int(info.st_mode & 0o777), .modificationDate: Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec))], ofItemAtPath: destination.path)
+            } else { throw ShelfError.invalid("\(source.lastPathComponent) is a symbolic link or special file. ZIP export accepts regular files and folders without links.") }
+        }
+        for input in inputs {
+            let base = input.lastPathComponent
+            guard !base.isEmpty, base != "/", base != ".", base != ".." else { throw ShelfError.invalid("Choose individual files or folders rather than an entire volume.") }
+            var name = base, suffix = 2
+            while !names.insert(name.precomposedStringWithCanonicalMapping.lowercased()).inserted { name = "\(input.deletingPathExtension().lastPathComponent) (\(suffix))" + (input.pathExtension.isEmpty ? "" : "." + input.pathExtension); suffix += 1 }
+            try stage(input, at: staging.appendingPathComponent(name), depth: 0)
+        }
+        try runDitto(["-c", "-k", "--norsrc", "--noextattr", staging.path, archive.path], cancel: cancel, log: scratch.appendingPathComponent("ditto.log"), didLaunch: didLaunch)
+        let data = try readBoundedFile(archive, limit: maxInputBytes)
+        try saveNew(data, to: output, inputs: inputs, cancel: cancel)
+        return ToolResult(url: output, detail: "\(inputs.count) selected items · \(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file))\nOriginal files are unchanged. Duplicate names are numbered in the archive.")
+    }
+    static func optimizeImage(_ input: URL, to output: URL, jpeg: Bool, maxDimension: Int?, quality: Double, cancel: ToolCancellation) throws -> ToolResult {
+        try validateDestination(output, inputs: [input]); try cancel.check()
+        let bytes = try readBoundedFile(input, limit: maxInputBytes)
+        guard let source = CGImageSourceCreateWithData(bytes as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else { throw ShelfError.invalid("This image format could not be read by macOS.") }
+        guard CGImageSourceGetCount(source) == 1 else { throw ShelfError.invalid("Animated or multi-image files cannot be optimized here. Apron will not discard their frames.") }
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let width = (properties?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let height = (properties?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        guard width > 0, height > 0, width <= 100_000, height <= 100_000, Double(width) * Double(height) <= 100_000_000 else { throw ShelfError.invalid("This image exceeds the 100-megapixel Quick Tools input limit.") }
+        let dimension = min(maxDimension ?? max(width, height), max(width, height))
+        guard dimension > 0, Double(width) * Double(height) * pow(min(1, Double(dimension) / Double(max(width, height))), 2) <= 40_000_000 else { throw ShelfError.invalid("Original size would exceed 40 megapixels. Choose 1920 or 2560 pixels instead.") }
+        let options = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
+                       kCGImageSourceThumbnailMaxPixelSize: dimension, kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+        guard let decoded = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { throw ShelfError.invalid("macOS could not decode this image.") }
+        try cancel.check()
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let canvas = CGContext(data: nil, width: decoded.width, height: decoded.height, bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw ShelfError.invalid("There is not enough memory to optimize this image.") }
+        let rectangle = CGRect(x: 0, y: 0, width: decoded.width, height: decoded.height)
+        if jpeg { canvas.setFillColor(CGColor(gray: 1, alpha: 1)); canvas.fill(rectangle) }
+        canvas.draw(decoded, in: rectangle)
+        guard let image = canvas.makeImage() else { throw ShelfError.invalid("The new image could not be created.") }
+        // A fresh sRGB raster carries no source EXIF, GPS, IPTC, XMP or orientation metadata.
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, (jpeg ? UTType.jpeg : UTType.png).identifier as CFString, 1, nil) else { throw ShelfError.invalid("The chosen image format is unavailable.") }
+        let outputProperties: [CFString: Any] = jpeg ? [kCGImageDestinationLossyCompressionQuality: min(1, max(0.1, quality))] : [:]
+        CGImageDestinationAddImage(destination, image, outputProperties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { throw ShelfError.invalid("The optimized image could not be encoded.") }
+        try cancel.check(); try saveNew(data as Data, to: output, inputs: [input], cancel: cancel)
+        let difference = bytes.count - data.length
+        let size = ByteCountFormatter.string(fromByteCount: Int64(data.length), countStyle: .file)
+        let delta = ByteCountFormatter.string(fromByteCount: Int64(abs(difference)), countStyle: .file)
+        let comparison = difference > 0 ? "\(delta) smaller" : difference < 0 ? "\(delta) larger" : "same file size"
+        return ToolResult(url: output, detail: "\(image.width) × \(image.height) · \(size) · \(comparison)\nSource metadata and location information removed.")
+    }
+    static func pageIndices(_ text: String, pageCount: Int) throws -> [Int] {
+        guard pageCount > 0, pageCount <= maxPDFPages, text.count <= 2048 else { throw ShelfError.invalid("Choose pages from a PDF with 1–300 pages.") }
+        var result = [Int](), seen = Set<Int>()
+        for part in text.replacingOccurrences(of: "–", with: "-").split(separator: ",", omittingEmptySubsequences: false) {
+            let bounds = part.split(separator: "-", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard (1...2).contains(bounds.count), let first = Int(bounds[0]), first >= 1, first <= pageCount,
+                  let last = Int(bounds.last!), last >= first, last <= pageCount else { throw ShelfError.invalid("Use page numbers such as 1, 3–5 within 1–\(pageCount). Reversed or empty ranges are not allowed.") }
+            for page in first...last {
+                guard seen.insert(page).inserted else { throw ShelfError.invalid("Page \(page) is repeated. List each page only once.") }
+                result.append(page - 1)
+            }
+        }
+        return result
+    }
+    static func pdfCopy(_ inputs: [URL], to output: URL, pages: String? = nil, cancel: ToolCancellation) throws -> ToolResult {
+        guard !inputs.isEmpty, inputs.count <= 20, pages == nil || inputs.count == 1 else { throw ShelfError.invalid("Choose at most 20 PDFs, or one PDF for page extraction.") }
+        try validateDestination(output, inputs: inputs)
+        var documents = [PDFDocument](), byteCount = 0, pageCount = 0
+        for url in inputs {
+            try cancel.check()
+            let data = try readBoundedFile(url, limit: maxInputBytes - byteCount); byteCount += data.count
+            guard let document = PDFDocument(data: data) else { throw ShelfError.invalid("\(url.lastPathComponent) is not a readable PDF.") }
+            guard !document.isEncrypted && !document.isLocked else { throw ShelfError.invalid("\(url.lastPathComponent) is encrypted or locked. Use an unprotected copy.") }
+            guard document.allowsCopying else { throw ShelfError.invalid("\(url.lastPathComponent) does not allow page copying.") }
+            pageCount += document.pageCount
+            guard document.pageCount > 0, pageCount <= maxPDFPages else { throw ShelfError.invalid("Quick Tools accepts at most 300 total PDF pages.") }
+            documents.append(document)
+        }
+        let outputDocument = PDFDocument()
+        for document in documents {
+            let indices = try pages.map { try pageIndices($0, pageCount: document.pageCount) } ?? Array(0..<document.pageCount)
+            for index in indices {
+                try cancel.check()
+                guard let page = document.page(at: index)?.copy() as? PDFPage else { throw ShelfError.invalid("A PDF page could not be copied.") }
+                outputDocument.insert(page, at: outputDocument.pageCount)
+            }
+        }
+        try cancel.check()
+        guard let data = outputDocument.dataRepresentation() else { throw ShelfError.invalid("macOS could not create the new PDF.") }
+        try saveNew(data, to: output, inputs: inputs, cancel: cancel)
+        return ToolResult(url: output, detail: "\(outputDocument.pageCount) pages · \(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file))\nOriginal PDFs are unchanged.")
+    }
+}
+final class ImageToolOptions: NSView {
+    let format = NSPopUpButton(), dimension = NSPopUpButton(), quality = NSSlider(value: 0.82, minValue: 0.1, maxValue: 1, target: nil, action: nil)
+    let qualityValue = NSTextField(labelWithString: "82%")
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        format.addItems(withTitles: ["JPEG", "PNG"]); format.target = self; format.action = #selector(updateQuality(_:))
+        dimension.addItems(withTitles: ["1920 pixels", "2560 pixels", "Original dimensions"]); dimension.selectItem(at: 1)
+        quality.target = self; quality.action = #selector(updateQuality(_:))
+        format.setAccessibilityLabel("Output image format"); dimension.setAccessibilityLabel("Maximum image dimension"); quality.setAccessibilityLabel("JPEG quality")
+        let qualityRow = NSStackView(views: [quality, qualityValue]); qualityRow.orientation = .horizontal; qualityRow.spacing = 8
+        let rows = [("Format", format as NSView), ("Longest edge", dimension as NSView), ("JPEG quality", qualityRow as NSView)]
+        let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
+        for (title, control) in rows {
+            let label = NSTextField(labelWithString: title); label.font = .systemFont(ofSize: 12)
+            label.widthAnchor.constraint(equalToConstant: 92).isActive = true
+            control.widthAnchor.constraint(equalToConstant: 208).isActive = true
+            let row = NSStackView(views: [label, control]); row.spacing = 10; stack.addArrangedSubview(row)
+        }
+        addSubview(stack); stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(equalTo: trailingAnchor), stack.centerYAnchor.constraint(equalTo: centerYAnchor)])
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    @objc func updateQuality(_ sender: Any?) { quality.isEnabled = format.indexOfSelectedItem == 0; qualityValue.stringValue = "\(Int((quality.doubleValue * 100).rounded()))%"; qualityValue.textColor = quality.isEnabled ? .labelColor : .disabledControlTextColor }
+}
+
 struct ShelfRequest: Codable { var paths: [String]; var show: Bool; var appearance: String?; var receiptID: UUID?; var quit: Bool?; var shakeEnabled: Bool?; var style: ShelfStyle? }
 struct ShelfResponse: Codable { var ok: Bool; var added: Int; var error: String?; var visible: Bool? = nil; var processID: Int32? = nil; var style: ShelfStyle? = nil }
 // flock is held for the lifetime of the process; requests are data-only files in a
@@ -273,7 +501,7 @@ final class ShelfGrid: NSCollectionView {
     override func mouseDown(with event: NSEvent) { super.mouseDown(with: event); if event.clickCount == 2 { shelf?.openItems(nil) } }
     override func menu(for event: NSEvent) -> NSMenu? {
         let point = convert(event.locationInWindow, from: nil)
-        if let index = indexPathForItem(at: point), !selectionIndexPaths.contains(index) { selectionIndexPaths = [index] }
+        if let index = indexPathForItem(at: point), !selectionIndexPaths.contains(index) { selectionIndexPaths = [index]; shelf?.selectionChanged() }
         return super.menu(for: event)
     }
 }
@@ -318,7 +546,7 @@ final class ShelfThumbnail: NSCollectionViewItem {
         let queue = OperationQueue(); queue.maxConcurrentOperationCount = 2; queue.qualityOfService = .userInitiated; return queue
     }()
     static let cache = NSCache<NSString, NSImage>()
-    override var isSelected: Bool { didSet { (view as? TileBackground)?.selected = isSelected } }
+    override var isSelected: Bool { didSet { (view as? TileBackground)?.selected = isSelected; view.setAccessibilitySelected(isSelected) } }
     override func loadView() {
         view = TileBackground(frame: NSRect(x: 0, y: 0, width: 96, height: 112))
         for subview in [picture, nameLabel] { subview.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(subview) }
@@ -339,16 +567,24 @@ final class ShelfThumbnail: NSCollectionViewItem {
     func configure(_ item: ShelfItem, url: URL?, style: ShelfStyle) {
         _ = view; imageOperation?.cancel(); imageOperation = nil; isLoadingImage = false
         if let request = request { QLThumbnailGenerator.shared.cancel(request) }; request = nil
-        representedID = item.id; representationKey = nil; nameLabel.stringValue = item.name
+        representedID = item.id; representationKey = nil; nameLabel.stringValue = item.name; nameLabel.textColor = .labelColor
+        view.setAccessibilityElement(true); view.setAccessibilityRole(.group)
+        nameLabel.setAccessibilityElement(false); picture.setAccessibilityElement(false)
         imageDimensions.forEach { $0.constant = style.thumbnailSize }
         nameLabel.font = .systemFont(ofSize: style == .compact ? 10 : 11, weight: .regular)
         picture.imageScaling = .scaleProportionallyUpOrDown
         picture.contentTintColor = nil
         guard let url = url, !url.isFileURL || FileManager.default.fileExists(atPath: url.path) else {
             picture.image = NSImage(systemSymbolName: "questionmark.folder", accessibilityDescription: "File unavailable"); picture.contentTintColor = .secondaryLabelColor
-            view.toolTip = "Unavailable. Right-click to locate the original."; view.setAccessibilityLabel(item.name + ", unavailable"); return
+            let recovery = item.kind == .file ? "Use Locate Original from the item’s menu to reconnect it." : "The saved import is missing. Add it again from its source."
+            nameLabel.stringValue = item.name + " · Missing"; nameLabel.textColor = .secondaryLabelColor
+            view.toolTip = item.name + " is unavailable. " + recovery
+            view.setAccessibilityLabel(item.name + ", missing file"); view.setAccessibilityHelp(recovery); return
         }
-        view.toolTip = url.isFileURL ? url.path : url.absoluteString; view.setAccessibilityLabel(item.name)
+        view.toolTip = url.isFileURL ? url.path : url.absoluteString
+        let kind = item.kind == .link ? "link" : item.kind == .text ? "text note" : item.kind == .image ? "image" : "file"
+        view.setAccessibilityLabel(item.name + ", " + kind)
+        view.setAccessibilityHelp("Space to preview. Return to open. Delete removes only the shelf reference.")
         if item.kind == .link {
             picture.image = NSImage(systemSymbolName: "link", accessibilityDescription: "Web link")?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: style == .compact ? 28 : 38, weight: .regular)); picture.imageScaling = .scaleNone; picture.contentTintColor = .secondaryLabelColor; return
         }
@@ -402,12 +638,21 @@ final class ShelfThumbnail: NSCollectionViewItem {
     }
 }
 
-final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSCollectionViewDataSource, NSCollectionViewDelegate, NSMenuDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
+final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSCollectionViewDataSource, NSCollectionViewDelegate, NSMenuDelegate, NSSearchFieldDelegate, NSMenuItemValidation, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     let store: ShelfStore, instance: ShelfInstance
     let panel = ApronPanel(contentRect: NSRect(x: 0, y: 0, width: 344, height: 196), styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
     let surface = DropSurface(), effect = NSVisualEffectView(), grid = ShelfGrid(), scroll = NSScrollView()
     let empty = EmptyShelfView(), shelfPicker = NSPopUpButton(), count = NSTextField(labelWithString: "0 items")
     let status = NSTextField(labelWithString: "")
+    let searchField = NSSearchField(), searchRow = NSView()
+    let emptyTitle = NSTextField(labelWithString: "Drop files here"), emptyHint = NSTextField(labelWithString: "or paste with ⌘V")
+    var searchHeight: NSLayoutConstraint?
+    var visibleItems = [ShelfItem](), selectedIDs = Set<UUID>()
+    var updatingSelection = false
+    var sharingPicker: NSSharingServicePicker?
+    var activeTool: ToolCancellation?
+    var quitAfterWork = false, quitReplySent = false
+    var terminationReply: (Bool) -> Void = { NSApp.reply(toApplicationShouldTerminate: $0) }
     let queue = OperationQueue()
     var previewURLs = [URL](), pendingReceivers = [UUID: NSFilePromiseReceiver]()
     var lastState: ShelfState?, initialPaths: [String], appearance: String
@@ -431,6 +676,9 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         instance.listen { [weak self] request in
             guard let self = self else { return }
             if request.quit == true { NSApp.terminate(nil); return }
+            if self.quitAfterWork {
+                try? self.instance.respond(to: request, with: ShelfResponse(ok: false, added: 0, error: "Apron is finishing incoming files before quitting. Try again after it exits.")); return
+            }
             if let enabled = request.shakeEnabled { self.shakeEnabled = enabled; self.configureDragMonitor() }
             if let style = request.style, style != self.style { self.applyStyle(style) }
             let previousCount = self.store.items.count
@@ -458,6 +706,18 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
             do { try self.instance.respond(to: request, with: response) } catch { self.report(error) }
         }
         if !background { show() }
+    }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard activeTool != nil || !pendingReceivers.isEmpty else { return .terminateNow }
+        quitAfterWork = true; activeTool?.cancel()
+        statusSummary?.title = pendingReceivers.isEmpty ? "Cancelling Quick Tool before quitting…" : "Waiting for incoming files before quitting…"
+        // File promises have no public cancellation API. Keep their receivers and
+        // callbacks alive until all writes finish and their shelf references save.
+        return .terminateLater
+    }
+    func completeQuitIfReady() {
+        guard quitAfterWork, !quitReplySent, activeTool == nil, pendingReceivers.isEmpty else { return }
+        quitReplySent = true; terminationReply(true)
     }
     func applicationWillTerminate(_ notification: Notification) {
         if let monitor = dragMonitor { NSEvent.removeMonitor(monitor) }
@@ -545,12 +805,13 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         let close = button("xmark", title: "Close shelf (⌘W)", action: #selector(closeShelf(_:)))
         let add = button("plus", title: "Add files (⌘O)", action: #selector(addFiles(_:)))
         let more = button("ellipsis", title: "Shelf actions", action: #selector(shelfMenu(_:)))
-        for button in [close, add, more] {
+        let find = button("magnifyingglass", title: "Find in shelf (⌘F)", action: #selector(findItems(_:)))
+        for button in [close, find, add, more] {
             button.isBordered = false; button.contentTintColor = .secondaryLabelColor
             button.widthAnchor.constraint(equalToConstant: 22).isActive = true
             button.heightAnchor.constraint(equalToConstant: 24).isActive = true
         }
-        let toolbar = NSStackView(views: [close, shelfPicker, NSView(), count, add, more]); toolbar.orientation = .horizontal; toolbar.spacing = 4; self.toolbar = toolbar
+        let toolbar = NSStackView(views: [close, shelfPicker, NSView(), count, find, add, more]); toolbar.orientation = .horizontal; toolbar.spacing = 4; self.toolbar = toolbar
         shelfPicker.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         let layout = NSCollectionViewFlowLayout(); layout.itemSize = style.tileSize
         layout.minimumInteritemSpacing = style.gap; layout.minimumLineSpacing = style.gap; layout.sectionInset = NSEdgeInsets(top: 4, left: 8, bottom: 8, right: 8)
@@ -563,15 +824,24 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         let menu = NSMenu(); menu.delegate = self; grid.menu = menu
         scroll.documentView = grid; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.drawsBackground = false; scroll.borderType = .noBorder
         let dropIcon = NSImageView(image: NSImage(systemSymbolName: "tray", accessibilityDescription: nil)!); dropIcon.contentTintColor = .secondaryLabelColor; dropIcon.imageScaling = .scaleProportionallyUpOrDown
-        let emptyTitle = label("Drop files here", size: 13, weight: .medium)
-        let emptyHint = label("or paste with ⌘V", size: 11, color: .tertiaryLabelColor)
+        emptyTitle.font = .systemFont(ofSize: 13, weight: .medium)
+        emptyHint.font = .systemFont(ofSize: 11); emptyHint.textColor = .tertiaryLabelColor
+        searchField.placeholderString = "Find in shelf"; searchField.delegate = self
+        searchField.target = self; searchField.action = #selector(searchChanged(_:))
+        searchField.sendsSearchStringImmediately = true; searchField.sendsWholeSearchString = false
+        searchField.setAccessibilityLabel("Find in current shelf"); searchField.toolTip = "Search names and paths. Escape clears, then closes search."
+        searchField.font = .systemFont(ofSize: 11); searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchRow.addSubview(searchField); searchRow.isHidden = true
+        searchHeight = searchRow.heightAnchor.constraint(equalToConstant: 0); searchHeight?.isActive = true
+        NSLayoutConstraint.activate([searchField.leadingAnchor.constraint(equalTo: searchRow.leadingAnchor), searchField.trailingAnchor.constraint(equalTo: searchRow.trailingAnchor), searchField.centerYAnchor.constraint(equalTo: searchRow.centerYAnchor)])
         let emptyContent = NSStackView(views: [dropIcon, emptyTitle, emptyHint]); emptyContent.orientation = .vertical; emptyContent.spacing = 7; emptyContent.alignment = .centerX
         emptyContent.translatesAutoresizingMaskIntoConstraints = false; empty.addSubview(emptyContent)
         NSLayoutConstraint.activate([emptyContent.centerXAnchor.constraint(equalTo: empty.centerXAnchor), emptyContent.centerYAnchor.constraint(equalTo: empty.centerYAnchor, constant: -5), dropIcon.widthAnchor.constraint(equalToConstant: 32), dropIcon.heightAnchor.constraint(equalToConstant: 32)])
-        for view in [toolbar, scroll, empty] { view.translatesAutoresizingMaskIntoConstraints = false; surface.addSubview(view) }
+        for view in [toolbar, searchRow, scroll, empty] { view.translatesAutoresizingMaskIntoConstraints = false; surface.addSubview(view) }
         NSLayoutConstraint.activate([
             toolbar.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: 12), toolbar.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -12), toolbar.topAnchor.constraint(equalTo: surface.topAnchor, constant: 10), toolbar.heightAnchor.constraint(equalToConstant: 26),
-            scroll.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: 8), scroll.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -8), scroll.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 8), scroll.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -8),
+            searchRow.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: 16), searchRow.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -16), searchRow.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 4),
+            scroll.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: 8), scroll.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -8), scroll.topAnchor.constraint(equalTo: searchRow.bottomAnchor, constant: 4), scroll.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -8),
             empty.leadingAnchor.constraint(equalTo: scroll.leadingAnchor), empty.trailingAnchor.constraint(equalTo: scroll.trailingAnchor), empty.topAnchor.constraint(equalTo: scroll.topAnchor), empty.bottomAnchor.constraint(equalTo: scroll.bottomAnchor)
         ])
         applyStyle(style)
@@ -592,8 +862,8 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
     }
     func fitTray() {
         let columns = max(3, Int((panel.frame.width - 24) / (style.tileSize.width + style.gap)))
-        let rows = min(4, max(1, Int(ceil(Double(store.items.count) / Double(columns)))))
-        let height: CGFloat = store.items.isEmpty ? (style == .compact ? 154 : 204) : CGFloat(rows) * (style.tileSize.height + style.gap) + (style == .compact ? 48 : 66)
+        let rows = min(4, max(1, Int(ceil(Double(visibleItems.count) / Double(columns)))))
+        let height: CGFloat = (visibleItems.isEmpty ? (style == .compact ? 154 : 204) : CGFloat(rows) * (style.tileSize.height + style.gap) + (style == .compact ? 48 : 66)) + (searchRow.isHidden ? 0 : 28)
         var frame = panel.frame; frame.origin.y += frame.height - height; frame.size.height = height
         panel.setFrame(frame, display: true, animate: false)
     }
@@ -640,10 +910,13 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         let file = NSMenu(title: "File"); fileItem.submenu = file
         addMenu(file, "Add Files…", #selector(addFiles(_:)), key: "o")
         addMenu(file, "New Shelf…", #selector(newShelf(_:)), key: "n")
+        addMenu(file, "Share…", #selector(shareItems(_:)))
         addMenu(file, "Close Shelf Window", #selector(closeShelf(_:)), key: "w")
         let edit = NSMenu(title: "Edit"); editItem.submenu = edit
         edit.addItem(withTitle: "Undo", action: #selector(ShelfGrid.undo(_:)), keyEquivalent: "z")
         edit.addItem(withTitle: "Copy Items", action: #selector(ShelfGrid.copy(_:)), keyEquivalent: "c")
+        let contents = addMenu(edit, "Copy Contents", #selector(copyContents(_:)), key: "c"); contents.keyEquivalentModifierMask = [.command, .shift]
+        addMenu(edit, "Find in Shelf…", #selector(findItems(_:)), key: "f")
         edit.addItem(withTitle: "Paste", action: #selector(ShelfGrid.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         NSApp.mainMenu = main
@@ -651,29 +924,66 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
     @discardableResult func addMenu(_ menu: NSMenu, _ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
         let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key); item.target = self; return item
     }
-    var selected: [ShelfItem] { grid.selectionIndexPaths.sorted { $0.item < $1.item }.compactMap { store.items.indices.contains($0.item) ? store.items[$0.item] : nil } }
+    var selected: [ShelfItem] { grid.selectionIndexPaths.sorted { $0.item < $1.item }.compactMap { visibleItems.indices.contains($0.item) ? visibleItems[$0.item] : nil } }
+    static func matchingItems(_ items: [ShelfItem], query: String) -> [ShelfItem] {
+        let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        return terms.isEmpty ? items : items.filter { item in terms.allSatisfy { item.name.localizedStandardContains($0) || item.location.localizedStandardContains($0) } }
+    }
     func refresh(preservingSelection: Bool = false) {
-        let ids = preservingSelection ? Set(selected.map(\.id)) : []
+        if !preservingSelection { selectedIDs.removeAll() }
+        selectedIDs.formIntersection(Set(store.items.map(\.id)))
         shelfPicker.removeAllItems()
         for group in store.state.groups { shelfPicker.addItem(withTitle: group.name) }
         shelfPicker.selectItem(at: store.groupIndex)
+        let shelfName = store.state.groups[store.groupIndex].name
+        panel.title = "Apron — " + shelfName
+        shelfPicker.setAccessibilityLabel("Shelf: " + shelfName); shelfPicker.setAccessibilityHelp("Choose a shelf. Use Shelf actions to rename or create one.")
+        grid.setAccessibilityLabel(shelfName + " · Shelf items")
+        updatingSelection = true
+        visibleItems = Self.matchingItems(store.items, query: searchField.stringValue)
         grid.reloadData()
-        grid.selectionIndexPaths = preservingSelection ? Set(store.items.indices.filter { ids.contains(store.items[$0].id) }.map { IndexPath(item: $0, section: 0) }) : []
-        empty.isHidden = !store.items.isEmpty; scroll.isHidden = store.items.isEmpty
-        count.stringValue = "\(store.items.count)"; count.isHidden = store.items.isEmpty
+        grid.selectionIndexPaths = Set(visibleItems.indices.filter { selectedIDs.contains(visibleItems[$0].id) }.map { IndexPath(item: $0, section: 0) })
+        updatingSelection = false
+        empty.isHidden = !visibleItems.isEmpty; scroll.isHidden = visibleItems.isEmpty
+        let filtering = !searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        emptyTitle.stringValue = filtering ? "No matching items" : "Drop files here"
+        emptyHint.stringValue = filtering ? "Try another name or clear search" : "or paste with ⌘V"
+        empty.setAccessibilityElement(true); empty.setAccessibilityRole(.group)
+        empty.setAccessibilityLabel(shelfName + (filtering ? ": no matching items" : ": empty shelf"))
+        empty.setAccessibilityHelp(filtering ? "Clear the search field to show all items. Escape clears search." : "Drop files here, paste with Command V, or use Add files with Command O. Original files remain in place.")
+        count.stringValue = filtering ? "\(visibleItems.count)/\(store.items.count)" : "\(store.items.count)"; count.isHidden = store.items.isEmpty
+        count.setAccessibilityLabel("\(visibleItems.count) of \(store.items.count) items")
         fitTray()
         statusSummary?.title = "\(store.items.count) items · \(store.state.groups[store.groupIndex].name)"
         updateSelectionStatus()
         if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared()?.isVisible == true { updatePreview() }
+    }
+    @objc func findItems(_ sender: Any?) {
+        searchRow.isHidden = false; searchHeight?.constant = 28; fitTray()
+        panel.makeFirstResponder(searchField); searchField.selectText(nil)
+    }
+    @objc func searchChanged(_ sender: Any?) { refresh(preservingSelection: true) }
+    func controlTextDidChange(_ notification: Notification) { refresh(preservingSelection: true) }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            if searchField.stringValue.isEmpty { searchRow.isHidden = true; searchHeight?.constant = 0; panel.makeFirstResponder(grid) }
+            else { searchField.stringValue = "" }
+            refresh(preservingSelection: true); return true
+        }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) || commandSelector == #selector(NSResponder.moveDown(_:)) { panel.makeFirstResponder(grid); return true }
+        return false
     }
     func perform(_ operation: () throws -> Void) {
         let before = store.state
         do { try operation(); if before != store.state { lastState = before }; refresh() }
         catch { report(error) }
     }
-    func report(_ error: Error) { status.stringValue = error.localizedDescription; pendingErrors.append(error); presentNextError() }
+    func report(_ error: Error) {
+        if quitAfterWork { fputs("Apron: " + error.localizedDescription + "\n", stderr); return }
+        status.stringValue = error.localizedDescription; pendingErrors.append(error); presentNextError()
+    }
     func presentNextError() {
-        guard panel.attachedSheet == nil, !pendingErrors.isEmpty else { return }
+        guard !quitAfterWork, panel.attachedSheet == nil, !pendingErrors.isEmpty else { return }
         let alert = NSAlert(error: pendingErrors.removeFirst())
         alert.beginSheetModal(for: panel) { [weak self] _ in DispatchQueue.main.async { self?.presentNextError() } }
     }
@@ -681,16 +991,19 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
     func updateSelectionStatus() {
         status.stringValue = selected.isEmpty ? "Original files stay where they are" : "\(selected.count) selected · Ready to drag out"
     }
-    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { store.items.count }
+    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { visibleItems.count }
     func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
         let cell = collectionView.makeItem(withIdentifier: NSUserInterfaceItemIdentifier("Thumbnail"), for: indexPath) as! ShelfThumbnail
-        let item = store.items[indexPath.item]; cell.configure(item, url: store.url(for: item), style: style); return cell
+        let item = visibleItems[indexPath.item]; cell.configure(item, url: store.url(for: item), style: style); return cell
     }
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) { selectionChanged() }
     func collectionView(_ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>) { selectionChanged() }
-    func selectionChanged() { updateSelectionStatus(); if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared()?.isVisible == true { updatePreview() } }
+    func selectionChanged() {
+        guard !updatingSelection else { return }
+        selectedIDs.subtract(visibleItems.map(\.id)); selectedIDs.formUnion(selected.map(\.id))
+        updateSelectionStatus(); if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared()?.isVisible == true { updatePreview() } }
     func collectionView(_ collectionView: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
-        guard store.items.indices.contains(indexPath.item), let url = store.url(for: store.items[indexPath.item]), !url.isFileURL || FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard visibleItems.indices.contains(indexPath.item), let url = store.url(for: visibleItems[indexPath.item]), !url.isFileURL || FileManager.default.fileExists(atPath: url.path) else { return nil }
         return url as NSURL
     }
     func collectionView(_ collectionView: NSCollectionView, validateDrop info: NSDraggingInfo, proposedIndexPath: AutoreleasingUnsafeMutablePointer<NSIndexPath>, dropOperation: UnsafeMutablePointer<NSCollectionView.DropOperation>) -> NSDragOperation {
@@ -698,8 +1011,9 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         return canImport(info.draggingPasteboard) ? .copy : []
     }
     func collectionView(_ collectionView: NSCollectionView, acceptDrop info: NSDraggingInfo, indexPath: IndexPath, dropOperation: NSCollectionView.DropOperation) -> Bool { importPasteboard(info.draggingPasteboard, receivingDrag: true) }
-    func canImport(_ pasteboard: NSPasteboard) -> Bool { pasteboard.availableType(from: dragTypes) != nil }
+    func canImport(_ pasteboard: NSPasteboard) -> Bool { !quitAfterWork && pasteboard.availableType(from: dragTypes) != nil }
     @discardableResult func importPasteboard(_ pasteboard: NSPasteboard, receivingDrag: Bool = false) -> Bool {
+        guard !quitAfterWork else { return false }
         // AppKit raises an exception if promises are received outside a real drag callback.
         if receivingDrag, let receivers = pasteboard.readObjects(forClasses: [NSFilePromiseReceiver.self], options: nil) as? [NSFilePromiseReceiver], !receivers.isEmpty {
             receivePromises(receivers); return true
@@ -740,12 +1054,16 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     completed += 1
-                    if let error = error { self.report(error) }
-                    else { self.perform { try self.store.receive(url, in: folder, groupID: groupID) } }
-                    if completed >= max(1, receiver.fileNames.count) { self.pendingReceivers.removeValue(forKey: id) }
+                    self.receivePromiseFile(url, error: error, folder: folder, groupID: groupID, receiverID: id, finished: completed >= max(1, receiver.fileNames.count))
                 }
             }
         }
+    }
+    func receivePromiseFile(_ url: URL, error: Error?, folder: URL, groupID: UUID, receiverID: UUID, finished: Bool) {
+        if let error = error { report(error) }
+        else { perform { try store.receive(url, in: folder, groupID: groupID) } }
+        if finished { pendingReceivers.removeValue(forKey: receiverID) }
+        completeQuitIfReady()
     }
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
@@ -754,7 +1072,9 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         addMenu(menu, "Open", #selector(openItems(_:))).isEnabled = hasSelection
         addMenu(menu, "Reveal in Finder", #selector(revealItems(_:))).isEnabled = hasSelection
         menu.addItem(.separator())
+        addMenu(menu, "Share…", #selector(shareItems(_:))).isEnabled = hasSelection
         addMenu(menu, "Copy Items", #selector(copyItems(_:))).isEnabled = hasSelection
+        addMenu(menu, "Copy Contents", #selector(copyContents(_:))).isEnabled = canCopyContents
         addMenu(menu, "Copy Paths / Links", #selector(copyPaths(_:))).isEnabled = hasSelection
         if selected.count == 1, selected[0].kind == .file { addMenu(menu, "Locate Original…", #selector(locateOriginal(_:))) }
         if store.state.groups.count > 1 && hasSelection {
@@ -765,17 +1085,153 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
             move.submenu = submenu; menu.addItem(move)
         }
         menu.addItem(.separator())
+        addQuickTools(to: menu)
+        menu.addItem(.separator())
         addMenu(menu, "Remove from Shelf", #selector(removeItems(_:))).isEnabled = hasSelection
         menu.autoenablesItems = false
     }
+    var selectedLocalURLs: [URL] { selected.compactMap(store.url).filter(\.isFileURL) }
+    func addQuickTools(to menu: NSMenu) {
+        let item = NSMenuItem(title: "Quick Tools", action: nil, keyEquivalent: ""), tools = NSMenu()
+        let urls = selectedLocalURLs, idle = activeTool == nil && panel.attachedSheet == nil
+        let image = urls.count == 1 && selected.count == 1 && UTType(filenameExtension: urls[0].pathExtension)?.conforms(to: .image) == true
+        let pdfs = !urls.isEmpty && urls.count == selected.count && urls.allSatisfy { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .pdf) == true }
+        addMenu(tools, "Optimize Image…", #selector(optimizeImage(_:))).isEnabled = idle && image
+        addMenu(tools, "Merge PDFs…", #selector(mergePDFs(_:))).isEnabled = idle && pdfs && urls.count >= 2 && urls.count <= 20
+        addMenu(tools, "Extract PDF Pages…", #selector(extractPDFPages(_:))).isEnabled = idle && pdfs && urls.count == 1
+        tools.addItem(.separator())
+        addMenu(tools, "Create ZIP…", #selector(createZIP(_:))).isEnabled = idle && !urls.isEmpty && urls.count == selected.count && urls.count <= 100
+        if activeTool != nil { tools.addItem(.separator()); addMenu(tools, "Cancel Current Tool", #selector(cancelQuickTool(_:))) }
+        tools.autoenablesItems = false; item.submenu = tools; menu.addItem(item)
+    }
+    @objc func createZIP(_ sender: Any?) {
+        let inputs = selectedLocalURLs
+        guard activeTool == nil, panel.attachedSheet == nil, !inputs.isEmpty, inputs.count == selected.count, inputs.count <= 100 else { return }
+        let groupID = store.state.active, alert = NSAlert()
+        alert.messageText = "Create ZIP"
+        alert.informativeText = "Archive \(inputs.count) selected files or folders into a new ZIP. Originals stay in place.\n\nUp to 128 MB and 4096 entries. Symbolic links and special files are not included; selecting one stops the operation. File contents, names and folders are preserved; Mac resource forks and extended attributes are omitted."
+        alert.addButton(withTitle: "Choose Destination…"); alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: panel) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self = self else { return }
+            let name = inputs.count == 1 ? inputs[0].deletingPathExtension().lastPathComponent + ".zip" : "Shelf files.zip"
+            self.chooseToolDestination(name: name, type: .zip, inputs: inputs) { output in
+                self.runQuickTool(title: "Creating ZIP…", successTitle: "ZIP saved", groupID: groupID) { cancel in
+                    try ShelfQuickTools.zipCopy(inputs, to: output, cancel: cancel)
+                }
+            }
+        }
+    }
+    @objc func optimizeImage(_ sender: Any?) {
+        guard activeTool == nil, panel.attachedSheet == nil, selected.count == 1, let input = selectedLocalURLs.first else { return }
+        let groupID = store.state.active, alert = NSAlert(), options = ImageToolOptions(frame: NSRect(x: 0, y: 0, width: 310, height: 106))
+        alert.messageText = "Optimize Image"
+        alert.informativeText = "Save a new copy. Source metadata, including GPS location, will be removed. JPEG uses a white background for transparency. Animated and multi-image files are not supported."
+        alert.accessoryView = options; alert.addButton(withTitle: "Choose Destination…"); alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: panel) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self = self else { return }
+            let jpeg = options.format.indexOfSelectedItem == 0
+            let size: Int? = [1920, 2560, nil][options.dimension.indexOfSelectedItem]
+            let quality = options.quality.doubleValue
+            self.chooseToolDestination(name: input.deletingPathExtension().lastPathComponent + " optimized." + (jpeg ? "jpg" : "png"), type: jpeg ? .jpeg : .png, inputs: [input]) { output in
+                self.runQuickTool(title: "Optimizing image…", successTitle: "Image copy saved", groupID: groupID) { cancel in
+                    try ShelfQuickTools.optimizeImage(input, to: output, jpeg: jpeg, maxDimension: size, quality: quality, cancel: cancel)
+                }
+            }
+        }
+    }
+    @objc func mergePDFs(_ sender: Any?) {
+        let inputs = selectedLocalURLs
+        guard activeTool == nil, panel.attachedSheet == nil, (2...20).contains(inputs.count), inputs.count == selected.count else { return }
+        let groupID = store.state.active, alert = NSAlert()
+        alert.messageText = "Merge \(inputs.count) PDFs"
+        alert.informativeText = "Pages will follow the visible shelf order:\n\n" + inputs.enumerated().map { "\($0.offset + 1). \($0.element.lastPathComponent)" }.joined(separator: "\n") + "\n\nUp to 300 pages and 128 MB in total. Originals are unchanged. The new PDF does not retain document signatures or bookmarks."
+        alert.addButton(withTitle: "Choose Destination…"); alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: panel) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self = self else { return }
+            self.chooseToolDestination(name: "Merged.pdf", type: .pdf, inputs: inputs) { output in
+                self.runQuickTool(title: "Merging PDFs…", successTitle: "Merged PDF saved", groupID: groupID) { cancel in
+                    try ShelfQuickTools.pdfCopy(inputs, to: output, cancel: cancel)
+                }
+            }
+        }
+    }
+    @objc func extractPDFPages(_ sender: Any?) {
+        guard activeTool == nil, panel.attachedSheet == nil, selected.count == 1, let input = selectedLocalURLs.first else { return }
+        let groupID = store.state.active, alert = NSAlert(), pages = NSTextField(string: "1")
+        alert.messageText = "Extract PDF Pages"
+        alert.informativeText = "Enter page numbers or ranges, such as 1, 3–5. Pages are copied in the order entered, without repeats.\n\nUp to 300 source pages and 128 MB. Originals are unchanged. The new PDF does not retain document signatures or bookmarks."
+        pages.frame = NSRect(x: 0, y: 0, width: 310, height: 24); pages.placeholderString = "1, 3–5"; pages.setAccessibilityLabel("Pages to extract")
+        alert.accessoryView = pages; alert.addButton(withTitle: "Choose Destination…"); alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: panel) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self = self else { return }
+            let range = pages.stringValue
+            do { _ = try ShelfQuickTools.pageIndices(range, pageCount: ShelfQuickTools.maxPDFPages) }
+            catch { self.report(error); return }
+            self.chooseToolDestination(name: input.deletingPathExtension().lastPathComponent + " pages.pdf", type: .pdf, inputs: [input]) { output in
+                self.runQuickTool(title: "Extracting PDF pages…", successTitle: "PDF pages saved", groupID: groupID) { cancel in
+                    try ShelfQuickTools.pdfCopy([input], to: output, pages: range, cancel: cancel)
+                }
+            }
+        }
+        alert.window.makeFirstResponder(pages)
+    }
+    func chooseToolDestination(name: String, type: UTType, inputs: [URL], completion: @escaping (URL) -> Void) {
+        guard !quitAfterWork else { return }
+        let save = NSSavePanel(); save.nameFieldStringValue = name; save.allowedContentTypes = [type]; save.canCreateDirectories = true
+        save.directoryURL = inputs.first?.deletingLastPathComponent()
+        save.prompt = "Save New Copy"; save.message = "Choose a new filename. Existing files, including the originals, will never be replaced."
+        save.beginSheetModal(for: panel) { [weak self] response in
+            guard response == .OK, let output = save.url else { return }
+            do { try ShelfQuickTools.validateDestination(output, inputs: inputs); completion(output) }
+            catch { self?.report(error) }
+        }
+    }
+    @objc func cancelQuickTool(_ sender: Any?) { activeTool?.cancel(); statusSummary?.title = "Cancelling Quick Tool…" }
+    func runQuickTool(title: String, successTitle: String, groupID: UUID, work: @escaping (ToolCancellation) throws -> ToolResult) {
+        guard activeTool == nil, !quitAfterWork else { return }
+        let cancel = ToolCancellation(), progress = NSAlert(); activeTool = cancel
+        progress.messageText = title; progress.informativeText = "Creating a new copy. Your original files stay unchanged. Cancelling may take a moment while macOS finishes the current file, page or image."
+        progress.addButton(withTitle: "Cancel"); statusSummary?.title = title
+        progress.beginSheetModal(for: panel) { [weak self] response in
+            if response == .alertFirstButtonReturn, self?.activeTool === cancel { self?.cancelQuickTool(nil) }
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result { try autoreleasepool { try work(cancel) } }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.activeTool = nil
+                if let parent = progress.window.sheetParent { parent.endSheet(progress.window, returnCode: .alertSecondButtonReturn) }
+                if self.quitAfterWork { self.completeQuitIfReady(); return }
+                DispatchQueue.main.async {
+                    guard !self.quitAfterWork else { return }
+                    switch result {
+                    case .success(let output):
+                        do {
+                            let before = self.store.state
+                            try self.store.addFiles([output.url], groupID: groupID); try self.store.selectGroup(groupID)
+                            self.lastState = before; self.searchField.stringValue = ""
+                            self.selectedIDs = Set(self.store.items.filter { self.store.url(for: $0) == output.url }.map(\.id))
+                            self.refresh(preservingSelection: true)
+                            let notice = NSAlert(); notice.messageText = successTitle; notice.informativeText = output.url.lastPathComponent + "\n\n" + output.detail
+                            notice.addButton(withTitle: "Done"); notice.beginSheetModal(for: self.panel)
+                        } catch { self.report(ShelfError.invalid("The copy was saved at \(output.url.path), but could not be added to its shelf: \(error.localizedDescription)")) }
+                    case .failure(let error):
+                        self.refresh(preservingSelection: true)
+                        if !(error is CancellationError) { self.report(error) }
+                    }
+                }
+            }
+        }
+    }
     @objc func addFiles(_ sender: Any?) {
+        guard !quitAfterWork else { return }
         let open = NSOpenPanel(); open.canChooseDirectories = true; open.canChooseFiles = true; open.allowsMultipleSelection = true; open.prompt = "Add to Shelf"; open.message = "Original files stay in their current location."
         open.beginSheetModal(for: panel) { [weak self] response in guard response == .OK, let self = self else { return }; self.perform { try self.store.addFiles(open.urls) } }
     }
     @objc func pasteItems(_ sender: Any?) { importPasteboard(.general) }
     @objc func closeShelf(_ sender: Any?) { if QLPreviewPanel.sharedPreviewPanelExists() { QLPreviewPanel.shared()?.orderOut(nil) }; panel.orderOut(nil) }
     @objc func changeShelf(_ sender: Any?) {
-        do { try store.selectGroup(store.state.groups[shelfPicker.indexOfSelectedItem].id); refresh() }
+        do { try store.selectGroup(store.state.groups[shelfPicker.indexOfSelectedItem].id); searchField.stringValue = ""; refresh() }
         catch { report(error) }
     }
     @objc func openItems(_ sender: Any?) {
@@ -789,6 +1245,43 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         let urls = selected.compactMap(store.url)
         guard !urls.isEmpty else { return }
         NSPasteboard.general.clearContents(); NSPasteboard.general.writeObjects(urls.map { $0 as NSURL }); status.stringValue = "Copied \(urls.count) \(urls.count == 1 ? "item" : "items")"
+    }
+    var canCopyContents: Bool { selected.count == 1 && [.text, .image, .link].contains(selected[0].kind) }
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(copyContents(_:)) { return canCopyContents }
+        if menuItem.action == #selector(shareItems(_:)) { return !selected.isEmpty }
+        return true
+    }
+    @objc func shareItems(_ sender: Any?) {
+        let urls = selected.compactMap(store.url)
+        guard !urls.isEmpty else { return }
+        guard urls.allSatisfy({ !$0.isFileURL || FileManager.default.fileExists(atPath: $0.path) }) else { report(ShelfError.invalid("A selected file is unavailable. Locate its original before sharing.")); return }
+        sharingPicker = NSSharingServicePicker(items: urls)
+        let anchor = toolbar ?? surface
+        sharingPicker?.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+    }
+    func writeContents(of item: ShelfItem, to pasteboard: NSPasteboard) throws {
+        guard let url = store.url(for: item) else { throw ShelfError.invalid("This item is unavailable.") }
+        let payload = NSPasteboardItem()
+        switch item.kind {
+        case .link:
+            payload.setString(url.absoluteString, forType: .URL); payload.setString(url.absoluteString, forType: .string)
+        case .text:
+            let data = try readBoundedFile(url, limit: 16 * 1024 * 1024)
+            guard let text = String(data: data, encoding: .utf8) else { throw ShelfError.invalid("This note could not be read as text.") }
+            payload.setString(text, forType: .string)
+        case .image:
+            let data = try readBoundedFile(url, limit: 128 * 1024 * 1024)
+            payload.setData(data, forType: .png)
+        default: throw ShelfError.invalid("Copy Contents is available for one imported note, image or link.")
+        }
+        pasteboard.clearContents()
+        guard pasteboard.writeObjects([payload]) else { throw ShelfError.invalid("macOS could not copy this item’s contents.") }
+    }
+    @objc func copyContents(_ sender: Any?) {
+        guard canCopyContents, let item = selected.first else { return }
+        do { try writeContents(of: item, to: .general); status.stringValue = "Copied contents" }
+        catch { report(error) }
     }
     @objc func copyPaths(_ sender: Any?) {
         let paths = selected.compactMap(store.url).map { $0.isFileURL ? $0.path : $0.absoluteString }
@@ -826,6 +1319,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         let menu = NSMenu(); addMenu(menu, "New Shelf…", #selector(newShelf(_:))); addMenu(menu, "Rename Shelf…", #selector(renameShelf(_:)))
         menu.addItem(.separator()); addMenu(menu, "Clear Shelf…", #selector(clearShelf(_:)))
         if store.state.groups.count > 1 { addMenu(menu, "Remove Shelf…", #selector(deleteShelf(_:))) }
+        menu.addItem(.separator()); addQuickTools(to: menu)
         menu.addItem(.separator()); addMenu(menu, "Show Saved Imports", #selector(showImports(_:)))
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
     }
@@ -847,7 +1341,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         confirmRemoval(title: "Remove this shelf?") { [weak self] in guard let self = self else { return }; self.perform { try self.store.change { state in state.groups.removeAll { $0.id == state.active }; state.active = state.groups[0].id } } }
     }
     @objc func showImports(_ sender: Any?) { NSWorkspace.shared.open(store.imports) }
-    @objc func about(_ sender: Any?) { let alert = NSAlert(); alert.messageText = "Apron"; alert.informativeText = "A file shelf for Hangar.\n\nGather files, notes, images and links. Select several items to drag them together. Original files stay in place.\n\nSpace — Quick Look\nReturn — Open\nDelete — Remove from shelf\n⌘Z — Undo last change\n⌘V — Paste\n⌘N — New shelf"; alert.beginSheetModal(for: panel) }
+    @objc func about(_ sender: Any?) { let alert = NSAlert(); alert.messageText = "Apron"; alert.informativeText = "A file shelf for Hangar.\n\nGather files, notes, images and links. Select several items to drag them together. Original files stay in place.\n\nSpace — Quick Look\nReturn — Open\nDelete — Remove from shelf\n⌘Z — Undo last change\n⌘V — Paste\n⌘N — New shelf\n⌘F — Find in shelf\n⇧⌘C — Copy Contents"; alert.beginSheetModal(for: panel) }
 }
 
 
@@ -868,6 +1362,9 @@ func runStorageTests() throws {
     try require(store.items.count == 1, "duplicate references coalesced")
     try store.addText("A useful note 🛫")
     try store.addLink(URL(string: "https://example.com/a?q=hello")!)
+    try require(ShelfController.matchingItems(store.items, query: "  ORIGINAL 日本語 ").map(\.id) == [store.items[0].id], "search ignores case and matches all name/path terms")
+    try require(ShelfController.matchingItems(store.items, query: "example.com").map(\.id) == [store.items[2].id], "search includes link destinations")
+    try require(ShelfController.matchingItems(store.items, query: "missing-result").isEmpty, "search has empty results")
     let restarted = try ShelfStore(directory: stateRoot)
     try require(restarted.items.count == 3, "all kinds survive restart")
     try require(restarted.items[0].kind == .file, "reference kind preserved")
@@ -950,6 +1447,120 @@ func runStorageTests() throws {
     print("PASS: Apron original safety, Unicode/duplicate imports, text/link restart, missing files, write rollback, named shelves/undo, promised-file receipt, traversal/symlink rejection, corrupt-state preservation, single-instance IPC/receipts, bounded reads and drag-shake intent/cooldown")
 }
 
+func runQuickToolTests() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ApronQuickTools-" + UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    func url(_ name: String) -> URL { root.appendingPathComponent(name) }
+    func rejects(_ description: String, _ work: () throws -> Void) throws {
+        do { try work() } catch { return }
+        throw ShelfError.invalid("Quick Tools test: " + description)
+    }
+    func hash(_ file: URL) throws -> SHA256.Digest { SHA256.hash(data: try Data(contentsOf: file)) }
+    let canvas = CGContext(data: nil, width: 200, height: 100, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    canvas.setFillColor(CGColor(red: 0.15, green: 0.65, blue: 0.4, alpha: 1)); canvas.fill(CGRect(x: 0, y: 0, width: 200, height: 100))
+    let image = canvas.makeImage()!, input = url("Original.jpg")
+    let originalWriter = CGImageDestinationCreateWithURL(input as CFURL, UTType.jpeg.identifier as CFString, 1, nil)!
+    CGImageDestinationAddImage(originalWriter, image, [kCGImagePropertyOrientation: 6, kCGImagePropertyExifDictionary: [kCGImagePropertyExifDateTimeOriginal: "2026:10:05 12:34:56"], kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFMake: "Private camera"], kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 12.5, kCGImagePropertyGPSLatitudeRef: "N", kCGImagePropertyGPSLongitude: 77.5, kCGImagePropertyGPSLongitudeRef: "E"]] as CFDictionary)
+    try require(CGImageDestinationFinalize(originalWriter), "image fixture encoded")
+    let originalHash = try hash(input), originalSource = CGImageSourceCreateWithURL(input as CFURL, nil)!
+    let originalProperties = CGImageSourceCopyPropertiesAtIndex(originalSource, 0, nil) as! [CFString: Any]
+    try require(originalProperties[kCGImagePropertyGPSDictionary] != nil, "fixture carries GPS metadata")
+    let png = url("Optimized.png")
+    let optimized = try ShelfQuickTools.optimizeImage(input, to: png, jpeg: false, maxDimension: 64, quality: 0.82, cancel: ToolCancellation())
+    let pngSource = CGImageSourceCreateWithURL(png as CFURL, nil)!, pngImage = CGImageSourceCreateImageAtIndex(pngSource, 0, nil)!
+    let properties = CGImageSourceCopyPropertiesAtIndex(pngSource, 0, nil) as! [CFString: Any]
+    try require(pngImage.width == 32 && pngImage.height == 64, "image resize honors orientation and maximum dimension")
+    try require(properties[kCGImagePropertyGPSDictionary] == nil && (properties[kCGImagePropertyExifDictionary] as? [CFString: Any])?[kCGImagePropertyExifDateTimeOriginal] == nil && (properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any])?[kCGImagePropertyTIFFMake] == nil, "optimized raster strips source GPS and EXIF")
+    try require(optimized.detail.contains("smaller") || optimized.detail.contains("larger") || optimized.detail.contains("same file size"), "size result reports actual comparison")
+    _ = try ShelfQuickTools.optimizeImage(input, to: url("Optimized.jpg"), jpeg: true, maxDimension: 40, quality: 0.5, cancel: ToolCancellation())
+    let jpeg = CGImageSourceCreateImageAtIndex(CGImageSourceCreateWithURL(url("Optimized.jpg") as CFURL, nil)!, 0, nil)!
+    try require(jpeg.width == 20 && jpeg.height == 40, "JPEG output dimensions")
+    let animation = url("Animation.gif"), gif = CGImageDestinationCreateWithURL(animation as CFURL, UTType.gif.identifier as CFString, 2, nil)!
+    CGImageDestinationAddImage(gif, image, nil); CGImageDestinationAddImage(gif, image, nil)
+    try require(CGImageDestinationFinalize(gif), "animated fixture encoded")
+    try rejects("animation must never flatten") { _ = try ShelfQuickTools.optimizeImage(animation, to: url("Flattened.png"), jpeg: false, maxDimension: 64, quality: 1, cancel: ToolCancellation()) }
+    try require(!FileManager.default.fileExists(atPath: url("Flattened.png").path), "rejected animation leaves no output")
+    let hardlink = url("Original hardlink.jpg"), symlink = url("Original symlink.jpg")
+    try FileManager.default.linkItem(at: input, to: hardlink); try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: input)
+    for protected in [input, hardlink, symlink, png] {
+        try rejects("existing files and aliases must not be overwritten") { try ShelfQuickTools.saveNew(Data("replacement".utf8), to: protected, inputs: [input], cancel: ToolCancellation()) }
+    }
+    let dangling = url("Dangling.png"); try FileManager.default.createSymbolicLink(at: dangling, withDestinationURL: url("missing.png"))
+    try rejects("dangling output symlink must not be followed") { try ShelfQuickTools.saveNew(Data(), to: dangling, inputs: [input], cancel: ToolCancellation()) }
+    let duringWrite = ToolCancellation(), interrupted = url("Interrupted copy.png")
+    var observedPartial = false
+    try rejects("cancellation during a write must clean the new file") {
+        try ShelfQuickTools.saveNew(Data(repeating: 42, count: 2 * 1024 * 1024), to: interrupted, inputs: [input], cancel: duringWrite) {
+            observedPartial = FileManager.default.fileExists(atPath: interrupted.path); duringWrite.cancel()
+        }
+    }
+    try require(observedPartial && !FileManager.default.fileExists(atPath: interrupted.path), "mid-write cancellation removes its partial copy before returning")
+    let cancelled = ToolCancellation(); cancelled.cancel()
+    try rejects("cancelled operation must not publish") { try ShelfQuickTools.saveNew(Data("cancelled".utf8), to: url("Cancelled.png"), inputs: [input], cancel: cancelled) }
+    try require(!FileManager.default.fileExists(atPath: url("Cancelled.png").path), "cancelled output absent")
+    let finalImageHash = try hash(input)
+    try require(finalImageHash == originalHash, "image original bytes survive all operations")
+    func makePDF(_ name: String, widths: [Int], locked: Bool = false) throws -> URL {
+        let file = url(name), data = NSMutableData(), consumer = CGDataConsumer(data: data)!
+        let metadata: [CFString: Any] = locked ? [kCGPDFContextOwnerPassword: "owner", kCGPDFContextUserPassword: "reader"] : [:]
+        let context = CGContext(consumer: consumer, mediaBox: nil, metadata as CFDictionary)!
+        for width in widths {
+            var box = CGRect(x: 0, y: 0, width: width, height: 200)
+            context.beginPDFPage([kCGPDFContextMediaBox: Data(bytes: &box, count: MemoryLayout<CGRect>.size)] as CFDictionary)
+            context.setFillColor(CGColor(gray: 0.5, alpha: 1)); context.fill(CGRect(x: 5, y: 5, width: 20, height: 20)); context.endPDFPage()
+        }
+        context.closePDF(); try (data as Data).write(to: file); return file
+    }
+    let first = try makePDF("First.pdf", widths: [100, 200]), second = try makePDF("Second.pdf", widths: [300])
+    let firstHash = try hash(first), secondHash = try hash(second), merged = url("Merged.pdf")
+    _ = try ShelfQuickTools.pdfCopy([first, second], to: merged, cancel: ToolCancellation())
+    let mergedDocument = PDFDocument(url: merged)!
+    try require(mergedDocument.pageCount == 3 && (0..<3).map { Int(mergedDocument.page(at: $0)!.bounds(for: .mediaBox).width) } == [100, 200, 300], "PDF merge preserves input and page order")
+    _ = try ShelfQuickTools.pdfCopy([merged], to: url("Extracted.pdf"), pages: "3, 1", cancel: ToolCancellation())
+    let extracted = PDFDocument(url: url("Extracted.pdf"))!
+    try require(extracted.pageCount == 2 && [0, 1].map { Int(extracted.page(at: $0)!.bounds(for: .mediaBox).width) } == [300, 100], "PDF extraction honors requested page order")
+    for range in ["", "0", "4", "2-1", "1,1", "1,", "1--2", "-1"] { try rejects("invalid page range must fail: " + range) { _ = try ShelfQuickTools.pageIndices(range, pageCount: 3) } }
+    let validRange = try ShelfQuickTools.pageIndices("1, 2–3", pageCount: 3)
+    try require(validRange == [0, 1, 2], "page range includes endpoints")
+    let locked = try makePDF("Locked.pdf", widths: [100], locked: true)
+    try rejects("encrypted PDFs must fail") { _ = try ShelfQuickTools.pdfCopy([locked], to: url("Unlocked.pdf"), cancel: ToolCancellation()) }
+    let excessive = try makePDF("Too many pages.pdf", widths: Array(repeating: 100, count: 301))
+    try rejects("PDF page limit must fail") { _ = try ShelfQuickTools.pdfCopy([excessive], to: url("Too many output.pdf"), cancel: ToolCancellation()) }
+    try rejects("PDF file limit must fail") { _ = try ShelfQuickTools.pdfCopy(Array(repeating: first, count: 21), to: url("Too many files.pdf"), cancel: ToolCancellation()) }
+    try rejects("same PDF destination must fail") { _ = try ShelfQuickTools.pdfCopy([first, second], to: first, cancel: ToolCancellation()) }
+    let finalFirstHash = try hash(first), finalSecondHash = try hash(second)
+    try require(finalFirstHash == firstHash && finalSecondHash == secondHash, "PDF original hashes unchanged")
+    let folder = url("Trip 日本語"), nested = folder.appendingPathComponent("Nested"), emptyFolder = folder.appendingPathComponent("Empty")
+    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: emptyFolder, withIntermediateDirectories: false)
+    let nestedFile = nested.appendingPathComponent("--notes $(literal).txt")
+    try Data("Original folder content".utf8).write(to: nestedFile)
+    let duplicateFolder = url("Other"); try FileManager.default.createDirectory(at: duplicateFolder, withIntermediateDirectories: false)
+    let duplicate = duplicateFolder.appendingPathComponent("Original.jpg"); try Data("Different file with same name".utf8).write(to: duplicate)
+    let nestedHash = try hash(nestedFile), archive = url("Export.zip")
+    _ = try ShelfQuickTools.zipCopy([folder, input, duplicate], to: archive, cancel: ToolCancellation())
+    let extractedZIP = url("Extracted ZIP"); try FileManager.default.createDirectory(at: extractedZIP, withIntermediateDirectories: false)
+    try ShelfQuickTools.runDitto(["-x", "-k", archive.path, extractedZIP.path], cancel: ToolCancellation(), log: url("extract.log"))
+    let extractedNested = extractedZIP.appendingPathComponent("Trip 日本語/Nested/--notes $(literal).txt")
+    let extractedNestedHash = try hash(extractedNested), extractedImageHash = try hash(extractedZIP.appendingPathComponent("Original.jpg"))
+    let duplicateData = try Data(contentsOf: extractedZIP.appendingPathComponent("Original (2).jpg"))
+    try require(extractedNestedHash == nestedHash && extractedImageHash == originalHash && duplicateData == Data("Different file with same name".utf8), "ZIP roundtrip preserves Unicode/path contents and disambiguates duplicate names")
+    try require(FileManager.default.fileExists(atPath: extractedZIP.appendingPathComponent("Trip 日本語/Empty").path), "ZIP preserves empty folders")
+    try rejects("ZIP cannot overwrite original") { _ = try ShelfQuickTools.zipCopy([input], to: input, cancel: ToolCancellation()) }
+    try rejects("ZIP destination cannot be inside selected folder") { _ = try ShelfQuickTools.zipCopy([folder], to: folder.appendingPathComponent("Inside.zip"), cancel: ToolCancellation()) }
+    let unsafeFolder = url("Unsafe folder"); try FileManager.default.createDirectory(at: unsafeFolder, withIntermediateDirectories: false)
+    try FileManager.default.createSymbolicLink(at: unsafeFolder.appendingPathComponent("External link"), withDestinationURL: input)
+    try rejects("ZIP must reject links instead of following outside selection") { _ = try ShelfQuickTools.zipCopy([unsafeFolder], to: url("Unsafe.zip"), cancel: ToolCancellation()) }
+    let zipCancel = ToolCancellation(), cancelledZIP = url("Cancelled.zip")
+    try rejects("ZIP cancellation stops its native child") { _ = try ShelfQuickTools.zipCopy([folder], to: cancelledZIP, cancel: zipCancel) { zipCancel.cancel() } }
+    try require(!FileManager.default.fileExists(atPath: cancelledZIP.path), "cancelled ZIP leaves no published or partial archive")
+    let finalNestedHash = try hash(nestedFile), finalZIPInputHash = try hash(input)
+    try require(finalNestedHash == nestedHash && finalZIPInputHash == originalHash, "ZIP leaves original file hashes unchanged")
+    print("PASS: ZIP native roundtrip, Unicode/metacharacter filenames, duplicate names, folder structure, source/link protection, child cancellation and original SHA-256 preservation")
+    print("PASS: Quick Tools image dimensions/orientation/metadata/animation safety, exclusive copy/alias protection/cancel, PDF merge order/extraction/range validation/encryption/page/file limits, original SHA-256 preservation")
+}
+
 final class PromiseTestWriter: NSObject, NSFilePromiseProviderDelegate {
     func filePromiseProvider(_ filePromiseProvider: NSFilePromiseProvider, fileNameForType fileType: String) -> String { "Promised attachment.txt" }
     func filePromiseProvider(_ filePromiseProvider: NSFilePromiseProvider, writePromiseTo url: URL, completionHandler: @escaping (Error?) -> Void) {
@@ -964,6 +1575,33 @@ func runPasteboardTests() throws {
     let store = try ShelfStore(directory: root), instance = try ShelfInstance(directory: root)
     let controller = ShelfController(store: store, instance: instance, paths: [], appearance: "system", shakeEnabled: false)
     controller.buildWindow(fixture: true)
+    let quittingTool = ToolCancellation(); controller.activeTool = quittingTool
+    try require(controller.applicationShouldTerminate(app) == .terminateLater && controller.quitAfterWork, "quit is deferred while Quick Tools owns a worker")
+    do { try quittingTool.check(); throw ShelfError.invalid("quit must cancel active Quick Tool") }
+    catch is CancellationError { }
+    controller.activeTool = nil; controller.quitAfterWork = false
+    try require(controller.applicationShouldTerminate(app) == .terminateNow, "idle quit does not wait")
+    let receiverID = UUID(), promiseFolder = store.imports.appendingPathComponent("Quit fixture")
+    try FileManager.default.createDirectory(at: promiseFolder, withIntermediateDirectories: false)
+    let firstPromise = promiseFolder.appendingPathComponent("First.txt"), lastPromise = promiseFolder.appendingPathComponent("Last.txt")
+    try Data("first complete".utf8).write(to: firstPromise); try Data("last complete".utf8).write(to: lastPromise)
+    controller.pendingReceivers[receiverID] = NSFilePromiseReceiver()
+    let concurrentTool = ToolCancellation(); controller.activeTool = concurrentTool
+    var replies = 0, persistedAtReply = false
+    controller.terminationReply = { allow in
+        replies += 1
+        persistedAtReply = allow && (try? ShelfStore(directory: root).items.count) == 2
+    }
+    try require(controller.applicationShouldTerminate(app) == .terminateLater, "quit waits for both file promises and Quick Tools")
+    controller.activeTool = nil; controller.completeQuitIfReady()
+    try require(replies == 0, "finished Quick Tool cannot exit while promise writes remain")
+    controller.receivePromiseFile(firstPromise, error: nil, folder: promiseFolder, groupID: store.state.active, receiverID: receiverID, finished: false)
+    try require(replies == 0 && store.items.count == 1, "first promised file saves without releasing quit early")
+    controller.receivePromiseFile(lastPromise, error: nil, folder: promiseFolder, groupID: store.state.active, receiverID: receiverID, finished: true)
+    controller.completeQuitIfReady()
+    try require(replies == 1 && persistedAtReply && controller.pendingReceivers.isEmpty, "quit replied once only after every promised reference was persisted")
+    try store.remove(ids: Set(store.items.map(\.id)))
+    controller.quitAfterWork = false; controller.quitReplySent = false; controller.refresh()
     let board = NSPasteboard.withUniqueName()
     defer { board.releaseGlobally() }
     guard board.setString("A clipboard note 🛫", forType: .string) else { throw ShelfError.invalid("The tool sandbox denied private pasteboard access. Run this native integration test from a normal macOS session.") }
@@ -978,11 +1616,36 @@ func runPasteboardTests() throws {
     try Data("Keep original".utf8).write(to: original)
     board.clearContents(); board.writeObjects([original as NSURL])
     try require(controller.importPasteboard(board) && store.items.count == 4 && store.items[3].kind == .file, "native file URL pasteboard import")
+    try require(controller.panel.title == "Apron — My shelf" && controller.shelfPicker.accessibilityLabel() == "Shelf: My shelf", "window and picker identify the active shelf")
+    let missingCell = ShelfThumbnail(), missing = ShelfItem(kind: .file, name: "Lost file.txt", location: root.appendingPathComponent("gone.txt").path)
+    missingCell.configure(missing, url: store.url(for: missing), style: .compact)
+    try require(missingCell.view.accessibilityLabel()?.contains("missing file") == true && missingCell.view.accessibilityHelp()?.contains("Locate Original") == true, "missing original announces recovery action")
+    let importedItems = store.items
+    try controller.writeContents(of: importedItems[0], to: board)
+    try require(board.string(forType: .string) == "A clipboard note 🛫" && board.data(forType: .fileURL) == nil, "Copy Contents writes note text, not a file reference")
+    try controller.writeContents(of: importedItems[1], to: board)
+    try require(board.string(forType: .URL) == "https://example.com/pasteboard" && board.string(forType: .string) == "https://example.com/pasteboard", "Copy Contents writes link and text representations")
+    try controller.writeContents(of: importedItems[2], to: board)
+    try require(board.data(forType: .png) == (try? Data(contentsOf: store.url(for: importedItems[2])!)), "Copy Contents preserves original PNG bytes")
+    controller.grid.selectionIndexPaths = [IndexPath(item: 0, section: 0), IndexPath(item: 2, section: 0)]; controller.selectionChanged()
+    controller.searchField.stringValue = "image"; controller.refresh(preservingSelection: true)
+    try require(controller.visibleItems.map(\.id) == [importedItems[2].id] && controller.selected.map(\.id) == [importedItems[2].id], "filter selection follows stable IDs rather than old indices")
+    let dragWriter = controller.collectionView(controller.grid, pasteboardWriterForItemAt: IndexPath(item: 0, section: 0)) as? NSURL
+    try require(dragWriter == store.url(for: importedItems[2])! as NSURL, "filtered drag exports the displayed file")
+    controller.searchField.stringValue = "not-present"; controller.refresh(preservingSelection: true)
+    try require(controller.selected.isEmpty && controller.emptyTitle.stringValue == "No matching items" && controller.empty.accessibilityLabel() == "My shelf: no matching items", "hidden selections cannot be acted on and empty search has an explanation")
+    controller.searchField.stringValue = ""; controller.refresh(preservingSelection: true)
+    try require(Set(controller.selected.map(\.id)) == Set([importedItems[0].id, importedItems[2].id]), "clearing search restores selected IDs")
+    controller.searchField.stringValue = "image"; controller.refresh(preservingSelection: true)
+    controller.removeItems(nil)
+    try require(store.items.map(\.id) == [importedItems[0].id, importedItems[1].id, importedItems[3].id], "filtered remove leaves hidden selected items untouched")
+    try require(FileManager.default.fileExists(atPath: store.url(for: importedItems[2])!.path), "filtered remove preserves imported image bytes")
+    controller.undoShelf(nil); controller.searchField.stringValue = ""; controller.refresh()
     let writer = PromiseTestWriter()
     let provider = NSFilePromiseProvider(fileType: UTType.plainText.identifier, delegate: writer)
     board.clearContents(); board.writeObjects([provider])
     try require(!controller.importPasteboard(board) && store.items.count == 4, "promise-only clipboard is safely refused outside a real drag session")
-    print("PASS: actual AppKit pasteboard text, web link, PNG and original-file imports; promise-only clipboard safely requires a drag")
+    print("PASS: actual AppKit pasteboard text, web link, PNG and original-file imports; promise-only clipboard safely requires a drag; contents payloads and filtered selection/drag identity")
     withExtendedLifetime(writer) {}; withExtendedLifetime(provider) {}
 }
 
@@ -1029,7 +1692,7 @@ do {
         try require(noStyle.style == nil, "omitted style does not reset a running shelf")
         try require(glassStyle.style == .glass, "glass style parsed")
         try require(compactStyle.style == .compact, "compact style parsed")
-        try runStorageTests(); exit(0)
+        try runStorageTests(); try runQuickToolTests(); exit(0)
     }
     if arguments.pasteboardTest { try runPasteboardTests(); exit(0) }
     if let destination = arguments.renderPreview {

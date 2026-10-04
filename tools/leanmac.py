@@ -16,20 +16,21 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import tomllib
 
-VERSION = '2026.10.05.1'
+VERSION = '2026.10.05.2'
 USER_DIR = Path.home()
 # Stable storage namespace shared with existing LeanMac installations.
 STATE = USER_DIR / 'Library/Application Support/LeanMac'
 CONFIG = USER_DIR / '.aerospace.toml'
 HS_DIR = USER_DIR / '.hammerspoon'
 LUA_FILES = ('leanmac.lua', 'window-picker.lua', 'window-snap.lua', 'spaces-sync.lua',
-             'mx-buttons.lua', 'leanmac-runtime.lua', 'leanmac-health.lua', 'leanmac-palette.lua', 'window-groups.lua',
+             'mx-buttons.lua', 'leanmac-runtime.lua', 'leanmac-health.lua', 'leanmac-palette.lua', 'hangar-hold.lua', 'hangar-sessions.lua', 'window-groups.lua',
              'window-links.lua', 'workspace-overview.lua', 'picker-panel.lua', 'hangar-config.lua')
 HS_APP = Path('/Applications/Hammerspoon.app')
 HS = str(HS_APP / 'Contents/Frameworks/hs/hs')
@@ -49,15 +50,15 @@ s.mxPicker=x.picker~=nil and x.picker.enabled==true end end
 print('LEANMAC_JSON:'..hs.json.encode(s))"""
 
 
-def run(args, timeout=5, required=False):
+def run(args, timeout=5, required=False, decode_errors="strict"):
     try:
         p = subprocess.run([str(x) for x in args], stdin=subprocess.DEVNULL,
-                           capture_output=True, text=True, timeout=timeout, env=ENV)
+                           capture_output=True, text=True, errors=decode_errors, timeout=timeout, env=ENV)
         result = (p.returncode, p.stdout.strip(), p.stderr.strip())
     except (OSError, subprocess.TimeoutExpired) as e:
         result = (124 if isinstance(e, subprocess.TimeoutExpired) else 127, '', str(e))
     if required and result[0]:
-        raise RuntimeError(f'{Path(str(args[0])).name}: {result[2] or result[1]}')
+        raise RuntimeError(f'{Path(str(args[0])).name}: {result[2] or result[1] or "exited with status " + str(result[0])}')
     return result
 
 
@@ -222,6 +223,8 @@ def validate_user_config(config):
 def lua_literal(value):
     if type(value) is bool:
         return 'true' if value else 'false'
+    if type(value) is int:
+        return str(value)
     if isinstance(value, str):
         # Lua accepts quoted UTF-8 and these escapes; inputs have no control bytes.
         return json.dumps(value, ensure_ascii=False)
@@ -339,6 +342,8 @@ def doctor():
     if not state:
         add('hammerspoon', 'fail', 'Hammerspoon IPC unavailable: ' + errors.get('hs', 'unknown error'))
     else:
+        add('runtime-version', 'ok' if state.get('version') == VERSION else 'fail',
+            f'Loaded Hangar {state.get("version", "unknown")}; CLI {VERSION}')
         for key, message in [('accessibility', 'Hammerspoon Accessibility'), ('loaded', 'Hangar modules loaded'),
                              ('pickerSubscriber', 'Window picker event subscription'), ('pickerForward', 'Option+Tab'),
                              ('pickerBackward', 'Option+Shift+Tab'), ('pickerSearch', 'Search picker'),
@@ -366,7 +371,7 @@ def doctor():
             pass
     report['secureInput'] = secure
     if secure:
-        _, registry, _ = run(['/usr/sbin/ioreg', '-l', '-w', '0'], timeout=5)
+        _, registry, _ = run(['/usr/sbin/ioreg', '-l', '-w', '0'], timeout=5, decode_errors='replace')
         pids = sorted(set(re.findall(r'"kCGSSessionSecureInputPID"\s*=\s*(\d+)', registry)))
         owners = []
         for pid in pids:
@@ -394,6 +399,18 @@ def doctor():
     code, _, err = run(['/usr/bin/codesign', '--verify', '--strict', str(overview_app)])
     overview_ok = code == 0 and os.access(overview_app / 'Contents/MacOS/leanmac-overview', os.X_OK)
     add('overview-helper', 'ok' if overview_ok else 'fail', 'Native AppKit overview signature and executable mode valid' if overview_ok else 'Native overview missing, invalid or not executable: ' + err)
+    for identity, bundle, executable in [('picker-helper', 'LeanMacPicker.app', 'leanmac-picker'),
+                                         ('shelf-helper', 'HangarShelf.app', 'hangar-shelf'),
+                                         ('settings-helper', 'HangarSettings.app', 'hangar-settings')]:
+        app = HS_DIR / 'bin' / bundle
+        code, _, _ = run(['/usr/bin/codesign', '--verify', '--strict', app])
+        try:
+            version = plistlib.loads((app / 'Contents/Info.plist').read_bytes()).get('CFBundleVersion')
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            version = None
+        healthy = code == 0 and os.access(app / 'Contents/MacOS' / executable, os.X_OK) and version == VERSION
+        add(identity, 'ok' if healthy else 'fail',
+            f'{bundle}: signature, executable and version match' if healthy else f'{bundle}: missing, invalid or outdated; apply saved settings to rebuild')
     report['ok'] = not any(c['status'] == 'fail' for c in report['checks'])
     report['warnings'] = sum(c['status'] == 'warn' for c in report['checks'])
     return report
@@ -601,7 +618,43 @@ def reload_agents(manifest):
                 USER_DIR / f'Library/LaunchAgents/local.leanmac.{app}.plist'], required=True)
 
 
+def stop_shelf_for_update():
+    """Wait for Apron's graceful exit before replacing its executable or resources."""
+    lock = STATE / 'Apron/instance.lock'
+    try:
+        descriptor = os.open(lock, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise RuntimeError('Cannot verify Apron instance lock; close Apron and check its state directory before retrying.') from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RuntimeError('Apron instance lock must be a regular file.')
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return  # No running instance: do not launch a helper just to quit it.
+        except BlockingIOError:
+            pass
+        deadline = time.monotonic() + 20
+        helper = HS_DIR / 'bin/HangarShelf.app/Contents/MacOS/hangar-shelf'
+        code, _, _ = run([helper, '--quit'], timeout=5)
+        if code:
+            raise RuntimeError('Apron could not be asked to quit. Quit Apron normally, then retry the update.')
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError('Apron is still finishing work. Let it quit normally, then retry the update; no files were replaced by this step.')
+                time.sleep(min(0.1, remaining))
+    finally:
+        os.close(descriptor)
+
+
 def restore_transaction(backup, manifest):
+    stop_shelf_for_update()
     errors = []
     # A preference failure must never prevent the core shortcut files being restored.
     for action in (lambda: restore_extras(backup, manifest),
@@ -757,6 +810,9 @@ def install(kit, check_only=False, extras=False):
             shutil.copy2(source, backup / 'candidate' / str(i))
         manifest['hashes'] = {str(dest): hashlib.sha256(source.read_bytes()).hexdigest() for dest, source in staged.items()}
         save_manifest(backup, manifest)
+        # A failed quit has not changed live files and must not trigger another quit
+        # through automatic restoration while the first request is still pending.
+        stop_shelf_for_update()
         def interrupted(signum, frame):
             raise RuntimeError(f'Installation interrupted by signal {signum}')
         handlers = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGINT)}
@@ -894,11 +950,36 @@ def default_kit():
         return None
 
 
+def runtime_receipt(module, method, arguments=''):
+    lua = (f'assert(leanmac and leanmac.{module}, "Utility unavailable; install or reload Hangar first"); '
+           f'print("HANGAR_REPLY:" .. hs.json.encode(leanmac.{module}.{method}({arguments})))')
+    code, out, err = run([HS, '-t', '3', '-c', lua], timeout=5)
+    if code:
+        raise RuntimeError(err or out or 'Hammerspoon did not respond')
+    for line in out.splitlines():
+        if line.startswith('HANGAR_REPLY:'):
+            result = json.loads(line.removeprefix('HANGAR_REPLY:'))
+            if not isinstance(result, dict):
+                raise RuntimeError('Utility returned an invalid status')
+            return result
+    raise RuntimeError(err or out or 'Utility returned no status')
+
+
+def holding_pattern(action, minutes=30, display=False):
+    if action not in ('start', 'stop', 'status'):
+        raise ValueError('Unknown Holding Pattern action')
+    if action == 'start' and (type(minutes) is not int or not 1 <= minutes <= 1440):
+        raise ValueError('Duration must be between 1 and 1440 minutes')
+    arguments = f'{minutes}, {str(bool(display)).lower()}' if action == 'start' else ''
+    return runtime_receipt('hold', action, arguments)
+
+
 def main():
     parser = argparse.ArgumentParser(prog='hangar', description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     d = sub.add_parser('doctor', help='Read-only checks; exit 0 healthy, 1 warnings, 2 failures')
     d.add_argument('--json', action='store_true')
+    d.add_argument('--portable', action='store_true', help='Emit only allowlisted diagnostic statuses, without personal paths or details')
     i = sub.add_parser('install', help='Stage, validate, apply and verify the configuration transaction')
     i.add_argument('--kit', type=Path, default=default_kit())
     i.add_argument('--check', action='store_true', help='Stage and compile only; do not replace live configs')
@@ -908,13 +989,43 @@ def main():
     sub.add_parser('backups', help='List transactional backup names and states')
     sub.add_parser('palette', help='Open the command palette')
     settings = sub.add_parser('settings', help='Open Ground Control — visual settings and Quick Install')
-    settings.add_argument('--tab', choices=('general', 'shortcuts', 'utilities', 'maintenance'), default='general')
+    settings.add_argument('--tab', choices=('general', 'sessions', 'shortcuts', 'utilities', 'maintenance'), default='general')
     shelf = sub.add_parser('shelf', help='Open Apron or add files to its shelf')
     shelf.add_argument('paths', nargs='*', type=Path)
+    hold = sub.add_parser('hold', help='Holding Pattern — temporarily keep this Mac awake')
+    hold_actions = hold.add_subparsers(dest='hold_command', required=True)
+    for action in ('start', 'stop', 'status'):
+        command = hold_actions.add_parser(action)
+        command.add_argument('--json', action='store_true')
+        if action == 'start':
+            command.add_argument('--minutes', type=int, default=30, help='Duration from 1 to 1440 minutes (default: 30)')
+            command.add_argument('--display', action='store_true', help='Also prevent the display from idling to sleep')
+    focus = sub.add_parser('focus', help='Turnaround — Pomodoro focus and break sessions')
+    focus_actions = focus.add_subparsers(dest='focus_command', required=True)
+    for action in ('start', 'pause', 'resume', 'next', 'cancel', 'status'):
+        command = focus_actions.add_parser(action)
+        command.add_argument('--json', action='store_true')
+        if action == 'start':
+            command.add_argument('--minutes', type=int, default=25)
+            command.add_argument('--break-minutes', type=int, default=5)
+            command.add_argument('--long-break-minutes', type=int, default=15)
+    reminders = sub.add_parser('remind', help='Boarding Calls — quick local reminders')
+    reminder_actions = reminders.add_subparsers(dest='remind_command', required=True)
+    for action in ('add', 'list', 'cancel'):
+        command = reminder_actions.add_parser(action)
+        command.add_argument('--json', action='store_true')
+        if action == 'add':
+            command.add_argument('text')
+            command.add_argument('--minutes', type=int, required=True, help='Delay from 1 to 10080 minutes')
+        if action == 'cancel':
+            command.add_argument('id', type=int)
     utilities = sub.add_parser('utilities', help='List and install optional curated applications')
     utility_actions = utilities.add_subparsers(dest='utility_command', required=True)
     listing = utility_actions.add_parser('list')
     listing.add_argument('--json', action='store_true')
+    opening = utility_actions.add_parser('open', help='Open an installed catalog utility; Mole opens its status dashboard')
+    opening.add_argument('id')
+    opening.add_argument('--json', action='store_true')
     add_utility = utility_actions.add_parser('install')
     add_utility.add_argument('id')
     add_utility.add_argument('--json', action='store_true')
@@ -931,6 +1042,63 @@ def main():
             command.add_argument('--input', type=Path, required=True, help='JSON with revision, changes and local/shared scope')
     args = parser.parse_args()
     try:
+        if args.command in ('focus', 'remind'):
+            if args.command == 'focus':
+                method = {'start': 'startFocus', 'pause': 'pauseFocus', 'resume': 'resumeFocus', 'next': 'nextFocus', 'cancel': 'cancelFocus', 'status': 'status'}[args.focus_command]
+                arguments = ''
+                if args.focus_command == 'start':
+                    options = {'focusMinutes': args.minutes, 'breakMinutes': args.break_minutes, 'longBreakMinutes': args.long_break_minutes}
+                    for key, maximum in [('focusMinutes', 180), ('breakMinutes', 60), ('longBreakMinutes', 120)]:
+                        if not 1 <= options[key] <= maximum:
+                            raise ValueError(f'{key} must be between 1 and {maximum} minutes')
+                    arguments = lua_literal(options)
+            else:
+                method = {'add': 'add', 'list': 'status', 'cancel': 'cancel'}[args.remind_command]
+                arguments = ''
+                if args.remind_command == 'add':
+                    if not 1 <= args.minutes <= 10080:
+                        raise ValueError('Reminder delay must be between 1 and 10080 minutes')
+                    if not 1 <= len(args.text.strip()) <= 280 or any(ord(c) < 32 or ord(c) == 127 for c in args.text):
+                        raise ValueError('Reminder text must be one line of 1 to 280 characters')
+                    arguments = f'{lua_literal(args.text.strip())}, {args.minutes}'
+                elif args.remind_command == 'cancel':
+                    if args.id < 1: raise ValueError('Reminder ID must be positive')
+                    arguments = str(args.id)
+            result = runtime_receipt('sessions', method, arguments)
+            state = result.get('status', result)
+            failed = not result.get('ok', True) or bool(state.get('lastError'))
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False))
+            elif failed:
+                print(result.get('error') or state.get('lastError') or 'Session operation failed')
+            else:
+                state = result.get('status', result)
+                if args.command == 'focus':
+                    session = state['focus']
+                    minutes = max(0, (int(session['remainingSeconds']) + 59) // 60)
+                    print(f'Turnaround: {session["phase"].replace("_", " ")} · {session["state"].replace("_", " ")} · {minutes} min remaining')
+                else:
+                    if 'id' in result: print(f'Reminder {result["id"]} added.')
+                    for entry in state['reminders']:
+                        minutes = max(0, (int(entry['remainingSeconds']) + 59) // 60)
+                        print(f'{entry["id"]}: {entry["text"]} — in {minutes} min')
+                    if not state['reminders']: print('No pending reminders.')
+            return 2 if failed else 0
+        if args.command == 'hold':
+            result = holding_pattern(args.hold_command, getattr(args, 'minutes', 30), getattr(args, 'display', False))
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False))
+            elif result.get('lastError'):
+                print(result['lastError'])
+            elif result.get('stopping'):
+                print('Holding Pattern: stopping.')
+            elif result['active']:
+                remaining = max(1, (int(result.get('remainingSeconds', 0)) + 59) // 60)
+                mode = 'system and display' if result.get('display') else 'system; display can sleep'
+                print(f'Holding Pattern: {remaining} min remaining ({mode}).')
+            else:
+                print('Holding Pattern: stopping.' if result.get('stopping') else 'Holding Pattern: off.')
+            return 0 if result.get('ok', True) else 2
         if args.command == 'config':
             if args.config_command == 'init':
                 init_user_config()
@@ -963,6 +1131,10 @@ def main():
                     for entry in result:
                         print(f'{entry["name"]}: {"installed" if entry["installed"] else entry.get("reason") or "available"}')
                 return 0
+            if args.utility_command == 'open':
+                result = hangar_catalog.open_utility(args.id)
+                print(json.dumps(result, ensure_ascii=False) if args.json else result['message'])
+                return 0 if result.get('ok') else 2
             result = hangar_catalog.install_utility(args.id, emit=lambda line: print(line, file=sys.stderr, flush=True), allow_unnotarized=args.allow_unnotarized)
             print(json.dumps(result, ensure_ascii=False) if args.json else result['message'])
             return 0 if result.get('ok') else 2
@@ -992,7 +1164,11 @@ def main():
             return 0
         if args.command == 'doctor':
             report = doctor()
-            print_report(report, args.json)
+            if args.portable:
+                import hangar_settings
+                print(json.dumps(hangar_settings.diagnostics_export(report), indent=2))
+            else:
+                print_report(report, args.json)
             return 2 if not report['ok'] else 1 if report['warnings'] else 0
         if args.command == 'install':
             install(args.kit, args.check, args.extras)

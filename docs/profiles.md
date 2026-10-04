@@ -112,3 +112,11 @@ Ask the agent to use `hangar-config`, for example: “Change the shared terminal
 Native macOS Desktops remain separate from AeroSpace workspaces. Hangar neither changes their ordering nor moves their windows at startup. Palette **Gather windows** and its configured hotkey both ask first; gathering moves windows to each display's active Desktop and does not delete Desktops.
 
 Logi Options+ is configured separately. Its button can emit the configured `mx_picker` chord (F17 by default); workspace gestures use F18/F19. Hangar does not copy device IDs or import mouse settings.
+
+## Ground Control editing
+
+The form labels each saved value as a Hangar default, existing legacy default, shared dotfile value or per-Mac override. **Choose…** selects a launcher application; **Reset** restores one shortcut to its shipped default in the draft. These controls do not activate changes. **Review** lists unsaved before/after values, and **Save & Apply** shows that review before activating edits. Shared changes shadowed by local values are rejected with an explanation.
+
+Profile descriptions explain workspace names and display preferences. A complete `aerospace.toml` override continues to take precedence. The Shortcuts page reflects the configured bindings; the reserved Option+Tab pair remains fixed.
+
+Recovery can export a portable diagnostic JSON report, also available with `hangar doctor --portable`. It contains only the release version, known check statuses and selected readiness booleans. Personal paths, machine names, window titles, display IDs, app lists, raw error messages and reminder contents are excluded. Nothing is uploaded.

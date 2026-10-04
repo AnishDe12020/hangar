@@ -7,6 +7,39 @@ import re
 import time
 
 
+PROFILE_DETAILS = {
+    'default': {
+        'title': 'Work, Browser, Social and Media',
+        'description': 'Tiled workspaces W (Work), B (Browser), S (Social) and M (Media). '
+                       'Work and Browser prefer the main display; Social and Media prefer a secondary display, falling back to main.',
+    },
+    'numbered-study': {
+        'title': 'Work, Study, Social and Misc',
+        'description': 'Vertical accordion workspaces 1 (Work), 2 (Study), 3 (Social) and 4 (Misc), with explicit horizontal pairs. '
+                       'Work and Study prefer the main display; Social and Misc prefer a secondary display, falling back to main.',
+    },
+}
+
+
+def field_provenance(lm, config):
+    """Attribute effective editable fields by presence, including equal overrides."""
+    result = {'schema': 'default', 'profile': 'legacy' if config['sources']['profile'] == 'legacy-selector' else 'default',
+              'shelf_style': 'default'}
+    for section in ('apps', 'hotkeys', 'modules'):
+        origin = 'legacy' if section == 'apps' and config['legacy_defaults'] else 'default'
+        result.update({f'{section}.{key}': origin for key in config[section]})
+    for filename, origin in (('settings.toml', 'shared'), ('settings.local.toml', 'local')):
+        path = lm.user_config_dir() / filename
+        if not path.exists() and not path.is_symlink():
+            continue
+        for key, value in lm.read_user_settings(path).items():
+            if key in ('apps', 'hotkeys', 'modules'):
+                result.update({f'{key}.{nested}': origin for nested in value})
+            else:
+                result[key] = origin
+    return result
+
+
 def revision(lm):
     digest = hashlib.sha256()
     for path in (lm.user_config_dir() / 'settings.toml', lm.user_config_dir() / 'settings.local.toml',
@@ -21,6 +54,7 @@ def snapshot(lm, kit):
     for _ in range(3):
         token = revision(lm)
         config = lm.resolve_user_config(kit)
+        provenance = field_provenance(lm, config)
         if revision(lm) == token:
             break
     else:
@@ -32,10 +66,59 @@ def snapshot(lm, kit):
                            if not p.stem.startswith('aerospace-local'))
     if config['profile'] not in profiles:
         profiles.append(config['profile'])
+    override = bool(config['sources']['aerospace'] and Path(config['sources']['aerospace']).parent == lm.user_config_dir())
+    details = {name: copy.deepcopy(PROFILE_DETAILS.get(name, {
+        'title': 'Custom profile', 'description': 'A custom AeroSpace profile. Review its routes, workspaces and display assignments before applying.',
+    })) for name in profiles}
     return {'version': lm.VERSION, 'config': config, 'revision': token, 'profiles': profiles,
+            'provenance': provenance, 'profile_details': details,
+            'override_description': 'Your aerospace.toml supplies the complete window layout and takes precedence over the selected profile template.' if override else None,
             'defaults': {'hotkeys': lm.DEFAULT_HOTKEYS, 'apps': lm.PORTABLE_APPS, 'modules': lm.DEFAULT_MODULES},
             'directory': str(lm.user_config_dir()), 'kit': str(kit) if kit else None,
-            'override': bool(config['sources']['aerospace'] and Path(config['sources']['aerospace']).parent == lm.user_config_dir())}
+            'override': override}
+
+
+# Export a deliberately small support report. Never sanitize by walking arbitrary
+# input: new doctor fields and raw messages remain private unless explicitly added.
+DIAGNOSTIC_CHECKS = frozenset({
+    'profile', 'config-file', 'config-location', 'aerospace', 'mapping', 'strict-config',
+    'active-config', 'bindings', 'binding-mode', 'hammerspoon', 'accessibility', 'loaded',
+    'pickerSubscriber', 'pickerForward', 'pickerBackward', 'pickerSearch', 'snapKeys',
+    'snapMouse', 'mxPicker', 'paletteKey', 'healthWatcher', 'groupKeys', 'overviewKey',
+    'pickerPanel', 'native-router', 'desktops', 'secure-input', 'native-helper', 'alttab',
+    'focus-helper', 'overview-helper', 'runtime-version', 'picker-helper', 'shelf-helper', 'settings-helper',
+})
+DIAGNOSTIC_FLAGS = frozenset({
+    'accessibility', 'loaded', 'pickerSubscriber', 'pickerForward', 'pickerBackward',
+    'pickerSearch', 'snapKeys', 'snapMouse', 'mxPicker', 'paletteKey', 'healthWatcher',
+    'groupKeys', 'overviewKey', 'pickerPanel', 'nativeRouterLoaded',
+})
+
+
+def diagnostics_export(report):
+    """Pure allowlist projection; this function never discovers or reads user data."""
+    if not isinstance(report, dict):
+        raise ValueError('Expected a Hangar diagnostics report')
+    result = {'schema': 1, 'kind': 'hangar-diagnostics'}
+    version = report.get('version')
+    if isinstance(version, str) and re.fullmatch(r'[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{1,9}', version):
+        result['version'] = version
+    statuses, severity = {}, {'ok': 0, 'warn': 1, 'fail': 2}
+    checks = report.get('checks')
+    for check in checks if isinstance(checks, list) else []:
+        if not isinstance(check, dict):
+            continue
+        name, status = check.get('name'), check.get('status')
+        if isinstance(name, str) and name in DIAGNOSTIC_CHECKS and isinstance(status, str) and status in severity:
+            if severity[status] >= severity.get(statuses.get(name), -1):
+                statuses[name] = status
+    result['checks'] = [{'id': name, 'status': statuses[name]} for name in sorted(statuses)]
+    result['counts'] = {status: sum(value == status for value in statuses.values()) for status in severity}
+    state = report.get('hammerspoon')
+    result['hammerspoon'] = {key: state[key] for key in sorted(DIAGNOSTIC_FLAGS) if type(state.get(key)) is bool} if isinstance(state, dict) else {}
+    if type(report.get('secureInput')) is bool:
+        result['secureInput'] = report['secureInput']
+    return result
 
 
 def inline_comment(line):

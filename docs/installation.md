@@ -10,7 +10,7 @@ bash install.command            # install missing dependencies and activate
 
 Homebrew is installed separately from its official website. Apple's Command Line Tools provide Swift; Python must be 3.11 or newer. AeroSpace comes from `nikitabobko/tap/aerospace`; Hammerspoon is the other core dependency. Optional apps such as Tinycast, Shottr and Thaw are selected in Ground Control's Quick Install.
 
-`--check` compiles and ad-hoc signs three native helpers, runs their available self-tests, and validates Lua and TOML without writing installation state, replacing configuration, or installing dependencies. AeroSpace's semantic validation needs its active configuration path and runs during guarded activation. A successful staging check is not proof that OS permissions or live shortcuts work.
+`--check` compiles and ad-hoc signs five native helpers, runs their available self-tests, and validates Lua and TOML without writing installation state, replacing configuration, or installing dependencies. AeroSpace's semantic validation needs its active configuration path and runs during guarded activation. A successful staging check is not proof that OS permissions or live shortcuts work.
 
 `--configs-only` activates configs and helpers using installed dependencies. Both normal installation and configuration-only updates preserve optional app preferences.
 
@@ -30,7 +30,7 @@ Grant Accessibility to AeroSpace and Hammerspoon before expecting switching, sna
 
 ## Ground Control and Apron
 
-`hangar settings` opens visual settings. Desired edits are validated against shortcut ownership before saving; they do not activate until you apply. A separate settings backup is saved under `~/Library/Application Support/LeanMac/settings-backups`. **This Mac only** writes `settings.local.toml`; **Shared dotfiles** writes `settings.toml`, following an existing symlink. If a local override shadows a shared edit, Ground Control reports it rather than pretending the effective setting changed.
+`hangar settings` opens visual settings. Desired edits are validated against shortcut ownership before saving; they do not activate until you apply. A separate settings backup is saved under `~/Library/Application Support/LeanMac/settings-backups`. **This Mac** writes `settings.local.toml`; **Shared dotfiles** writes `settings.toml`, following an existing symlink. If a local override shadows a shared edit, Ground Control reports it rather than pretending the effective setting changed.
 
 Apron stores its shelf index and imported text/images under `~/Library/Application Support/LeanMac/Apron`. References to original files are separate from owned imports. Shelf contents, clipboard data and third-party app accounts are not synced by Hangar. New native helpers live under `~/.hammerspoon/bin/HangarShelf.app` and `HangarSettings.app`; the installer includes them in transactional backup and rollback.
 
@@ -38,7 +38,9 @@ If activation fails on a fresh Mac, it restores the configuration snapshot. Gran
 
 ## Updates outside iCloud
 
-Extract a new release or update your clone, inspect changes, then run its `install.command`. `hangar install --kit /path/to/Hangar --check` accepts an explicit source kit. The CLI can also reuse the previous transaction's source location while that folder exists; it never requires a particular cloud account or iCloud path. Keep the new folder through validation and rollback.
+Extract a new release or update your clone, inspect changes, then run its `install.command`. `hangar install --kit /path/to/Hangar --check` accepts an explicit source kit. Apron is asked to quit normally before managed files are replaced, and the installer waits for its instance lock; if it cannot finish, the update stops without forcing termination. Saved shelves are retained and the updated helper starts on reload. Close and reopen an already-open Ground Control window after an update to use its new interface.
+
+The CLI can also reuse the previous transaction's source location while that folder exists; it never requires a particular cloud account or iCloud path. Keep the new folder through validation and rollback.
 
 Dotfiles managers should delegate to this installer. Do not separately symlink or template AeroSpace/Hammerspoon files: that creates conflicting ownership and weakens rollback. Shell configuration and terminal/editor settings can remain owned by dotfiles.
 

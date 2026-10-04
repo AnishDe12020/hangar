@@ -1,5 +1,6 @@
 """Failure injection uses temporary paths and fake services; never the live Mac."""
 import importlib.util
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -61,6 +62,58 @@ class Transactions(unittest.TestCase):
 
     def manifests(self):
         return [json.loads(p.read_text()) for p in (self.state / 'backup').glob('*/manifest.json')]
+
+    def test_apron_update_waits_for_owned_lock_and_uses_graceful_quit(self):
+        lock = self.state / 'Apron/instance.lock'
+        lock.parent.mkdir(parents=True)
+        with lock.open('w+') as owner:
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            def quit_helper(args, timeout=5, required=False):
+                self.assertEqual([str(a) for a in args], [
+                    str(self.hs / 'bin/HangarShelf.app/Contents/MacOS/hangar-shelf'), '--quit'])
+                fcntl.flock(owner, fcntl.LOCK_UN)
+                return 0, '', ''
+            with patch.object(lm, 'run', quit_helper):
+                lm.stop_shelf_for_update()
+            # Quiescence checking leaves the instance file usable by the next launch.
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_apron_update_noops_when_absent_or_unlocked_and_rejects_unsafe_lock(self):
+        lock = self.state / 'Apron/instance.lock'
+        with patch.object(lm, 'run', side_effect=AssertionError('must not launch Apron')):
+            lm.stop_shelf_for_update()
+            lock.parent.mkdir(parents=True)
+            lock.write_text('')
+            lm.stop_shelf_for_update()
+            lock.unlink()
+            target = lock.parent / 'unrelated'
+            target.write_text('preserve me')
+            lock.symlink_to(target)
+            with self.assertRaisesRegex(RuntimeError, 'Apron'):
+                lm.stop_shelf_for_update()
+            self.assertEqual(target.read_text(), 'preserve me')
+            lock.unlink()
+            lock.mkdir()
+            with self.assertRaisesRegex(RuntimeError, 'Apron'):
+                lm.stop_shelf_for_update()
+
+    def test_busy_apron_prevents_install_and_restore_from_replacing_files(self):
+        lock = self.state / 'Apron/instance.lock'
+        lock.parent.mkdir(parents=True)
+        backup = lm.new_backup('fixture')
+        manifest = {'files': lm.snapshot_files(backup, [self.config])}
+        with lock.open('w+') as owner:
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch.object(lm.time, 'monotonic', side_effect=[0, 21]):
+                with self.assertRaisesRegex(RuntimeError, 'Apron'):
+                    lm.install(self.kit)
+            self.assertEqual(self.config.read_bytes(), b'old config bytes\n')
+            self.assertFalse((self.hs / 'leanmac.lua').exists())
+            self.config.write_text('current config')
+            with patch.object(lm.time, 'monotonic', side_effect=[0, 21]):
+                with self.assertRaisesRegex(RuntimeError, 'Apron'):
+                    lm.restore_transaction(backup, manifest)
+            self.assertEqual(self.config.read_text(), 'current config')
 
     def test_installed_cli_requires_source_instead_of_assuming_icloud(self):
         with patch.object(lm, '__file__', str(self.user / '.local/lib/leanmac/leanmac.py')):

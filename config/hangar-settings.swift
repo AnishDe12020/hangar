@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+import UniformTypeIdentifiers
 
 // Ground Control is a view over the CLI's validated settings and transactions.
 // It does not edit application preferences or execute arbitrary shell strings.
@@ -75,7 +76,7 @@ func stack(_ items: [NSView], vertical: Bool = true, spacing: CGFloat = 12) -> N
 }
 func separator() -> NSView { let b = NSBox(); b.boxType = .separator; return b }
 
-final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NSSearchFieldDelegate {
     let cli: String
     let preview: Bool
     var window: NSWindow!
@@ -86,19 +87,37 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var snapshot: [String: Any] = [:]
     var draft: [String: Any] = [:]
     var catalog: [[String: Any]] = []
+    var catalogList: NSStackView?
+    var utilitySearch: NSSearchField?
+    var utilityQuery = ""
     var fields: [String: NSTextField] = [:]
     var profile: NSPopUpButton?
+    var profileDescription: NSTextField?
     var shelf: NSButton?
     var shelfStyle: NSPopUpButton?
+    var holdStatus: NSTextField?
+    var holdStop: NSButton?
+    var holdStart: NSButton?
+    var holdRevision = 0
+    var holdRefresh: DispatchWorkItem?
+    var holdRefreshAfterBusy = false
+    var sessionState: [String: Any] = [:]
+    var sessionRevision = 0
+    var sessionRefresh: DispatchWorkItem?
+    var sessionRefreshAfterBusy = false
+    var focusStatus: NSTextField?
+    var focusButtons: [String: NSButton] = [:]
+    var reminderList: NSStackView?
     var selected = "general"
     var busy = false
     var buttons: [NSButton] = []
+    var configActions: [NSView] = []
     var navigation: [String: NSButton] = [:]
     var requestedTab: String
     var saveScope = 0
     var disabledControls: [ObjectIdentifier: (NSControl, Bool)] = [:]
     var diagnostics: [[String: Any]] = []
-    let labels = ["general": "General", "shortcuts": "Shortcuts", "utilities": "Quick Install", "maintenance": "Recovery"]
+    let labels = ["general": "General", "sessions": "Sessions", "shortcuts": "Shortcuts", "utilities": "Quick Install", "maintenance": "Recovery"]
 
     init(cli: String, tab: String, preview: Bool = false) { self.cli = cli; self.requestedTab = tab; self.preview = preview }
 
@@ -173,7 +192,7 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let brand = label("Hangar", size: 16, weight: .semibold)
         brand.translatesAutoresizingMaskIntoConstraints = false; sidebarContent.addSubview(brand)
         let menu = stack([], spacing: 4); menu.translatesAutoresizingMaskIntoConstraints = false; sidebarContent.addSubview(menu)
-        for (id, title, symbol, tint) in [("general", "General", "gearshape.fill", NSColor.systemGray), ("shortcuts", "Shortcuts", "command", NSColor.systemPurple), ("utilities", "Quick Install", "square.and.arrow.down.fill", NSColor.systemBlue), ("maintenance", "Recovery", "arrow.counterclockwise", NSColor.systemOrange)] {
+        for (id, title, symbol, tint) in [("general", "General", "gearshape.fill", NSColor.systemGray), ("sessions", "Sessions", "clock", NSColor.systemTeal), ("shortcuts", "Shortcuts", "command", NSColor.systemPurple), ("utilities", "Quick Install", "square.and.arrow.down.fill", NSColor.systemBlue), ("maintenance", "Recovery", "arrow.counterclockwise", NSColor.systemOrange)] {
             let b = NavigationButton(title, symbol: symbol, tint: tint) { [weak self] in self?.select(id) }
             b.alignment = .left; b.isBordered = false; b.setButtonType(.toggle); b.heightAnchor.constraint(equalToConstant: 39).isActive = true
             menu.addArrangedSubview(b); b.widthAnchor.constraint(equalTo: menu.widthAnchor).isActive = true; navigation[id] = b
@@ -196,14 +215,17 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
         scope.controlSize = .small; scope.font = .systemFont(ofSize: 11)
         scope.setAccessibilityLabel("Save settings to")
         scope.toolTip = "Choose where edited settings are saved. Applying affects only this Mac."
-        actions.addArrangedSubview(label("Save to", size: 11, color: .secondaryLabelColor)); actions.addArrangedSubview(scope)
+        let scopeLabel = label("Save to", size: 11, color: .secondaryLabelColor)
+        actions.addArrangedSubview(scopeLabel); actions.addArrangedSubview(scope)
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal); actions.addArrangedSubview(spacer)
         status.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let reload = ActionButton("Reload") { [weak self] in self?.reloadRequested() }
+        let review = ActionButton("Review") { [weak self] in _ = self?.reviewChanges() }
         let save = ActionButton("Save") { [weak self] in self?.save(apply: false) }
         let apply = ActionButton("Save & Apply") { [weak self] in self?.save(apply: true) }
         apply.keyEquivalent = "\r"
-        buttons = [reload, save, apply]; buttons.forEach { $0.controlSize = .small; $0.font = .systemFont(ofSize: 12); actions.addArrangedSubview($0) }
+        buttons = [reload, review, save, apply]; buttons.forEach { $0.controlSize = .small; $0.font = .systemFont(ofSize: 12); actions.addArrangedSubview($0) }
+        configActions = [scopeLabel, scope, review, save, apply]
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor), sidebar.topAnchor.constraint(equalTo: root.topAnchor), sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor), sidebar.widthAnchor.constraint(equalToConstant: 190),
             sidebarContent.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor), sidebarContent.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor), sidebarContent.topAnchor.constraint(equalTo: sidebar.topAnchor), sidebarContent.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor),
@@ -230,7 +252,22 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
             view.subviews.forEach(capture)
         }
         if value { if let root = window?.contentView { capture(root) } }
-        else { disabledControls.values.forEach { $0.0.isEnabled = $0.1 }; disabledControls.removeAll() }
+        else {
+            disabledControls.values.forEach { $0.0.isEnabled = $0.1 }; disabledControls.removeAll()
+            let refreshHold = holdRefreshAfterBusy, refreshSessions = sessionRefreshAfterBusy
+            holdRefreshAfterBusy = false; sessionRefreshAfterBusy = false
+            if selected == "sessions", refreshHold || refreshSessions {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self, self.selected == "sessions" else { return }
+                    if self.busy {
+                        self.holdRefreshAfterBusy = self.holdRefreshAfterBusy || refreshHold
+                        self.sessionRefreshAfterBusy = self.sessionRefreshAfterBusy || refreshSessions
+                        return
+                    }
+                    if refreshHold { self.refreshHold() }; if refreshSessions { self.refreshSessions() }
+                }
+            }
+        }
     }
 
     func run(_ args: [String], completion: @escaping (Int32, String, String) -> Void) {
@@ -276,7 +313,7 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func heading(_ title: String, _ detail: String) {
         add(stack([label(title, size: 20, weight: .semibold), label(detail, size: 12, color: .secondaryLabelColor)], spacing: 7))
     }
-    func group(_ title: String? = nil, rows: [NSView], detail: String? = nil) {
+    func group(_ title: String? = nil, rows: [NSView], detail: String? = nil, container: NSStackView? = nil) {
         let outer = stack([], spacing: 8)
         if let title = title { outer.addArrangedSubview(label(title, size: 12, weight: .semibold, color: .secondaryLabelColor)) }
         let body = SettingsGroup(); let items = stack([], spacing: 0)
@@ -288,7 +325,9 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
         outer.addArrangedSubview(body); body.widthAnchor.constraint(equalTo: outer.widthAnchor).isActive = true
         NSLayoutConstraint.activate([items.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 14), items.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -14), items.topAnchor.constraint(equalTo: body.topAnchor, constant: 3), items.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -3)])
         if let detail = detail { let note = label(detail, size: 11, color: .secondaryLabelColor); outer.addArrangedSubview(note); note.widthAnchor.constraint(equalTo: outer.widthAnchor).isActive = true }
-        add(outer)
+        if let container = container {
+            container.addArrangedSubview(outer); outer.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
+        } else { add(outer) }
     }
     func row(_ title: String, _ control: NSView, detail: String? = nil) -> NSView {
         let caption = label(title)
@@ -306,12 +345,36 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
         entry.font = group == "hotkeys" ? .monospacedSystemFont(ofSize: 11, weight: .regular) : .systemFont(ofSize: 12)
         entry.bezelStyle = .roundedBezel; entry.widthAnchor.constraint(equalToConstant: group == "hotkeys" ? 180 : 220).isActive = true
         entry.placeholderString = title; fields[group + "." + key] = entry
-        return row(title, entry)
+        var controls: [NSView] = [entry]
+        if group == "hotkeys", let defaults = (snapshot["defaults"] as? [String: Any])?["hotkeys"] as? [String: String], let value = defaults[key] {
+            let reset = ActionButton("Reset") { entry.stringValue = value }
+            reset.controlSize = .small; reset.toolTip = "Use the default: \(value)"
+            reset.setAccessibilityLabel("Reset \(title) shortcut to default"); controls.append(reset)
+        } else if group == "apps" {
+            let choose = ActionButton("Choose…") { [weak self] in
+                guard let self = self else { return }
+                let panel = NSOpenPanel(); panel.title = "Choose \(title)"
+                panel.directoryURL = URL(fileURLWithPath: "/Applications")
+                panel.allowedContentTypes = [.applicationBundle]; panel.treatsFilePackagesAsDirectories = false
+                panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+                panel.beginSheetModal(for: self.window) { reply in
+                    guard reply == .OK, let url = panel.url, url.pathExtension == "app", Bundle(url: url)?.executableURL != nil else { return }
+                    entry.stringValue = url.deletingPathExtension().lastPathComponent
+                }
+            }
+            choose.controlSize = .small; choose.setAccessibilityLabel("Choose \(title) application"); controls.append(choose)
+        }
+        return row(title, stack(controls, vertical: false, spacing: 6), detail: sourceLabel(group + "." + key))
+    }
+    func sourceLabel(_ path: String) -> String? {
+        guard let source = (snapshot["provenance"] as? [String: String])?[path] else { return nil }
+        return ["default":"Hangar default", "legacy":"Existing default", "shared":"Shared dotfiles", "local":"This Mac overrides shared settings"][source] ?? source
     }
     func select(_ page: String, collect shouldCollect: Bool = true) {
         guard !busy || !shouldCollect else { return }
         if shouldCollect { collect() }
         selected = labels[page] == nil ? "general" : page
+        configActions.forEach { $0.isHidden = selected != "general" && selected != "shortcuts" }
         navigation.forEach { key, button in
             button.state = key == selected ? .on : .off
             button.contentTintColor = .labelColor
@@ -319,7 +382,11 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         content.arrangedSubviews.forEach { content.removeArrangedSubview($0); $0.removeFromSuperview() }
         content.enclosingScrollView?.contentView.scroll(to: .zero)
-        fields = [:]; profile = nil; shelf = nil; shelfStyle = nil
+        fields = [:]; profile = nil; profileDescription = nil; shelf = nil; shelfStyle = nil
+        holdStatus = nil; holdStart = nil; holdStop = nil
+        holdRefresh?.cancel(); holdRefresh = nil
+        sessionRefresh?.cancel(); sessionRefresh = nil; focusStatus = nil; focusButtons = [:]; reminderList = nil
+        catalogList = nil; utilitySearch = nil
         guard !snapshot.isEmpty else { return }
         switch selected {
         case "shortcuts":
@@ -332,12 +399,16 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if !otherKeys.isEmpty { group("Workspace & apps", rows: otherKeys.map { field("hotkeys", $0, $0.replacingOccurrences(of: "_", with: " ").capitalized) }) }
             add(label("Enter a chord such as ctrl-alt-cmd-w. Hangar checks for shortcut conflicts before saving.", size: 11, color: .secondaryLabelColor))
         case "utilities": buildUtilities()
+        case "sessions": buildSessions()
         case "maintenance": buildMaintenance()
         default:
             heading("General", "Your workspace, default apps and built-in utilities.")
             let p = NSPopUpButton(); p.addItems(withTitles: snapshot["profiles"] as? [String] ?? ["default"]); p.selectItem(withTitle: draft["profile"] as? String ?? "default"); profile = p
             p.widthAnchor.constraint(equalToConstant: 220).isActive = true
-            group("Workspace", rows: [row("Profile", p)], detail: snapshot["override"] as? Bool == true ? "Your aerospace.toml controls routing and layout. A profile change keeps that file intact." : nil)
+            p.target = self; p.action = #selector(profileChanged)
+            let description = label("", size: 11, color: .secondaryLabelColor); profileDescription = description
+            group("Workspace", rows: [row("Profile", p, detail: sourceLabel("profile"))])
+            add(description); profileChanged()
             group("Default apps", rows: [field("apps", "terminal", "Terminal"), field("apps", "browser", "Browser"), field("apps", "finder", "File browser")])
             let b = NSButton(checkboxWithTitle: "Enabled", target: nil, action: nil)
             b.state = (draft["modules"] as? [String: Bool] ?? [:])["shelf"] == false ? .off : .on; shelf = b
@@ -347,8 +418,182 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let style = NSPopUpButton(); style.addItems(withTitles: ["Compact", "Glass"])
             style.selectItem(at: draft["shelf_style"] as? String == "glass" ? 1 : 0)
             style.widthAnchor.constraint(equalToConstant: 220).isActive = true; shelfStyle = style
-            group("Utilities", rows: [row("Apron", actions, detail: "Files, text and links, ready to carry."), row("Apron style", style, detail: "A small tray or a roomier glass panel.")], detail: "Shake while dragging to open the shelf. Removing an item leaves its original file in place.")
+            group("Utilities", rows: [row("Apron", actions, detail: sourceLabel("modules.shelf")), row("Apron style", style, detail: sourceLabel("shelf_style"))], detail: "Shake while dragging to open the shelf. Removing an item leaves its original file in place.")
         }
+    }
+    @objc func profileChanged() {
+        let name = profile?.titleOfSelectedItem ?? "default"
+        let details = snapshot["profile_details"] as? [String: [String: String]] ?? [:]
+        var text = details[name]?["description"] ?? "Uses the selected AeroSpace workspace template."
+        if snapshot["override"] as? Bool == true {
+            text += " " + (snapshot["override_description"] as? String ?? "Your aerospace.toml controls routing and layout; selecting a template keeps that override intact.")
+        }
+        profileDescription?.stringValue = text
+    }
+    func buildSessions() {
+        heading("Sessions", "Small tools for the task in front of you.")
+        buildFocus()
+        buildReminders()
+        let duration = NSPopUpButton()
+        duration.addItems(withTitles: ["15 minutes", "30 minutes", "1 hour", "2 hours"])
+        duration.selectItem(at: 1); duration.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        duration.setAccessibilityLabel("Keep awake duration")
+        let display = NSButton(checkboxWithTitle: "Keep display awake too", target: nil, action: nil)
+        display.controlSize = .small
+        let start = ActionButton("Start", symbol: "play.fill") { [weak self] in
+            let minutes = [15, 30, 60, 120][max(0, duration.indexOfSelectedItem)]
+            self?.changeHold(["start", "--minutes", String(minutes)] + (display.state == .on ? ["--display"] : []))
+        }
+        let stop = ActionButton("Stop") { [weak self] in self?.changeHold(["stop"]) }
+        start.controlSize = .small; stop.controlSize = .small; stop.isEnabled = false
+        holdStart = start; holdStop = stop
+        let state = label("Reading session…", size: 12, color: .secondaryLabelColor); holdStatus = state
+        group("Holding Pattern", rows: [row("Duration", duration), row("Display", display), row("Keep awake", stack([start, stop], vertical: false, spacing: 8)), row("Status", state)], detail: "Keeps this Mac awake for a limited time. Your normal power settings stay in place. Sessions end when Hammerspoon quits or reloads; closing Settings leaves them running.")
+        refreshHold()
+        refreshSessions()
+    }
+    func buildFocus() {
+        let focusLength = NSPopUpButton(); focusLength.addItems(withTitles: ["15 min", "25 min", "45 min", "60 min"]); focusLength.selectItem(at: 1)
+        focusLength.setAccessibilityLabel("Focus duration")
+        let breakLength = NSPopUpButton(); breakLength.addItems(withTitles: ["5 min", "10 min", "15 min"])
+        breakLength.setAccessibilityLabel("Break duration")
+        let lengths = stack([label("Focus", size: 12), focusLength, label("Break", size: 12), breakLength], vertical: false, spacing: 8)
+        let state = label("Reading timer…", size: 12, color: .secondaryLabelColor); focusStatus = state
+        let start = ActionButton("Start", symbol: "play.fill") { [weak self] in
+            self?.changeSession(["focus", "start", "--minutes", String([15, 25, 45, 60][max(0, focusLength.indexOfSelectedItem)]), "--break-minutes", String([5, 10, 15][max(0, breakLength.indexOfSelectedItem)])])
+        }
+        let pause = ActionButton("Pause") { [weak self] in
+            guard let self = self else { return }
+            let focus = self.sessionState["focus"] as? [String: Any] ?? [:]
+            self.changeSession(["focus", focus["state"] as? String == "paused" ? "resume" : "pause"])
+        }
+        let next = ActionButton("Start break") { [weak self] in self?.changeSession(["focus", "next"]) }
+        let cancel = ActionButton("End session") { [weak self] in self?.changeSession(["focus", "cancel"]) }
+        focusButtons = ["start": start, "pause": pause, "next": next, "cancel": cancel]
+        focusButtons.values.forEach { $0.controlSize = .small; $0.isEnabled = false }
+        group("Turnaround · Focus timer", rows: [row("Lengths", lengths), row("Timer", state), row("Session", stack([start, pause, next, cancel], vertical: false, spacing: 7))], detail: "A 15-minute long break follows four focus rounds. Start each next phase when you’re ready. Timers and reminders survive reloads; notifications follow your macOS settings.")
+    }
+    func buildReminders() {
+        let text = NSTextField(string: ""); text.placeholderString = "What should I remind you about?"
+        text.widthAnchor.constraint(equalToConstant: 290).isActive = true; text.setAccessibilityLabel("Reminder text")
+        let delay = NSPopUpButton(); delay.addItems(withTitles: ["5 minutes", "15 minutes", "30 minutes", "1 hour", "2 hours"]); delay.selectItem(at: 1)
+        delay.setAccessibilityLabel("Reminder delay")
+        let addReminder = ActionButton("Add reminder", symbol: "plus") { [weak self] in
+            let value = text.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { self?.window.makeFirstResponder(text); return }
+            self?.changeSession(["remind", "add", value, "--minutes", String([5, 15, 30, 60, 120][max(0, delay.indexOfSelectedItem)])]) { text.stringValue = "" }
+        }
+        addReminder.controlSize = .small
+        group("Boarding Calls · Reminders", rows: [row("Remind me", text), row("When", stack([delay, addReminder], vertical: false, spacing: 8))], detail: "Private to this Mac. If it sleeps past a reminder, Hangar delivers it after waking.")
+        let pending = stack([], spacing: 8); reminderList = pending; add(pending)
+    }
+    func updateSessions(_ state: [String: Any]) {
+        sessionState = state; sessionRefresh?.cancel(); sessionRefresh = nil
+        let focus = state["focus"] as? [String: Any] ?? [:], phase = focus["phase"] as? String ?? "focus"
+        let mode = focus["state"] as? String ?? "idle"
+        let name = phase == "focus" ? "Focus" : phase == "long_break" ? "Long break" : "Break"
+        let next = focus["nextPhase"] as? String ?? "focus"
+        let nextName = next == "focus" ? "focus" : next == "long_break" ? "long break" : "break"
+        let formatter = DateFormatter(); formatter.timeStyle = .short
+        if let error = state["lastError"] as? String, !error.isEmpty { focusStatus?.stringValue = error }
+        else if mode == "running", let end = focus["endsAt"] as? Double { focusStatus?.stringValue = "\(name) until \(formatter.string(from: Date(timeIntervalSince1970: end)))" }
+        else if mode == "paused" { focusStatus?.stringValue = "\(name) paused · \(max(1, Int(ceil((focus["remainingSeconds"] as? Double ?? 0) / 60)))) min left" }
+        else if mode == "awaiting_next" { focusStatus?.stringValue = "\(name) complete · ready for \(nextName)" }
+        else { focusStatus?.stringValue = "Ready when you are" }
+        focusButtons["start"]?.isEnabled = mode == "idle" && !busy
+        focusButtons["pause"]?.isEnabled = (mode == "running" || mode == "paused") && !busy
+        focusButtons["pause"]?.title = mode == "paused" ? "Resume" : "Pause"
+        focusButtons["next"]?.isHidden = mode != "awaiting_next"
+        focusButtons["next"]?.isEnabled = mode == "awaiting_next" && !busy
+        focusButtons["next"]?.title = "Start \(nextName)"
+        focusButtons["cancel"]?.isEnabled = mode != "idle" && !busy
+        let reminders = state["reminders"] as? [[String: Any]] ?? []
+        if let list = reminderList {
+            list.arrangedSubviews.forEach { list.removeArrangedSubview($0); $0.removeFromSuperview() }
+            if reminders.isEmpty { list.addArrangedSubview(label("No pending reminders", size: 11, color: .tertiaryLabelColor)) }
+            for reminder in reminders {
+                guard let id = reminder["id"] as? Int, let text = reminder["text"] as? String, let end = reminder["endsAt"] as? Double else { continue }
+                let cancel = ActionButton("Cancel") { [weak self] in self?.changeSession(["remind", "cancel", String(id)]) }; cancel.controlSize = .small
+                let line = row(text, cancel, detail: formatter.string(from: Date(timeIntervalSince1970: end)))
+                list.addArrangedSubview(line); line.widthAnchor.constraint(equalTo: list.widthAnchor).isActive = true
+            }
+        }
+        var deadlines = reminders.compactMap { $0["endsAt"] as? Double }
+        if mode == "running", let end = focus["endsAt"] as? Double { deadlines.append(end) }
+        if !preview, (state["lastError"] as? String ?? "").isEmpty, let deadline = deadlines.min(), deadline > Date().timeIntervalSince1970 {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self, self.selected == "sessions" else { return }
+                if self.busy { self.sessionRefreshAfterBusy = true; return }; self.refreshSessions()
+            }
+            sessionRefresh = work; DispatchQueue.main.asyncAfter(deadline: .now() + max(1, deadline - Date().timeIntervalSince1970 + 0.3), execute: work)
+        }
+    }
+    func refreshSessions() {
+        if preview { updateSessions(["focus": ["state": "idle", "phase": "focus"], "reminders": []]); return }
+        sessionRevision += 1; let revision = sessionRevision
+        run(["focus", "status", "--json"]) { code, out, err in
+            guard revision == self.sessionRevision else { return }
+            if code == 0, let value = self.object(out) { self.updateSessions(value) }
+            else { self.focusStatus?.stringValue = "Session unavailable. Reload Hangar and try again." }
+        }
+    }
+    func changeSession(_ arguments: [String], completion: (() -> Void)? = nil) {
+        sessionRevision += 1; setBusy(true, "Updating session…")
+        run(arguments + ["--json"]) { code, out, err in
+            self.setBusy(false, "Session updated.")
+            if let value = self.object(out), let state = value["status"] as? [String: Any] { self.updateSessions(state) }
+            if code != 0 { self.fail(self.object(out)?["error"] as? String ?? (err.isEmpty ? out : err)) }
+            else { completion?() }
+        }
+    }
+    func updateHold(_ value: [String: Any]) {
+        holdRefresh?.cancel(); holdRefresh = nil
+        let active = value["active"] as? Bool == true
+        let stopping = value["stopping"] as? Bool == true
+        holdStop?.isEnabled = active && !stopping && !busy
+        holdStart?.title = active ? "Restart" : "Start"
+        if let error = value["lastError"] as? String, !error.isEmpty { holdStatus?.stringValue = error }
+        else if stopping { holdStatus?.stringValue = "Stopping…" }
+        else if active, let end = value["endsAt"] as? Double {
+            let date = Date(timeIntervalSince1970: end)
+            let formatter = DateFormatter(); formatter.timeStyle = .short
+            holdStatus?.stringValue = "Awake until \(formatter.string(from: date))" + (value["display"] as? Bool == true ? " · display on" : " · display can sleep")
+        } else { holdStatus?.stringValue = "Off · normal sleep behavior" }
+        if !preview, active, !stopping, (value["lastError"] as? String ?? "").isEmpty,
+           let deadline = value["endsAt"] as? Double, deadline > Date().timeIntervalSince1970 {
+            let delay = max(0.5, deadline - Date().timeIntervalSince1970 + 0.3)
+            let refresh = DispatchWorkItem { [weak self] in
+                guard let self = self, self.selected == "sessions" else { return }
+                if self.busy { self.holdRefreshAfterBusy = true; return }
+                self.refreshHold()
+            }
+            // One deadline refresh, with no timer while the utility is idle.
+            holdRefresh = refresh; DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: refresh)
+        }
+    }
+    func refreshHold() {
+        if preview { updateHold(["active": false]); return }
+        holdRevision += 1; let revision = holdRevision
+        run(["hold", "status", "--json"]) { code, out, err in
+            guard revision == self.holdRevision else { return }
+            if code == 0, let value = self.object(out) { self.updateHold(value) }
+            else { self.holdStatus?.stringValue = "Session unavailable. Reload Hangar and try again." }
+        }
+    }
+    func changeHold(_ arguments: [String]) {
+        holdRevision += 1
+        setBusy(true, "Updating Holding Pattern…")
+        run(["hold"] + arguments + ["--json"]) { code, out, err in
+            self.setBusy(false, "Session updated.")
+            if let value = self.object(out) { self.updateHold(value) }
+            if arguments.first == "stop" { DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                guard let self = self, self.selected == "sessions", !self.busy else { return }; self.refreshHold()
+            } }
+            if code != 0 { self.fail(self.object(out)?["lastError"] as? String ?? (err.isEmpty ? out : err)) }
+        }
+    }
+    func windowDidBecomeKey(_ notification: Notification) {
+        if selected == "sessions" && !busy { refreshHold(); refreshSessions() }
     }
     func collect() {
         saveScope = max(0, scope.indexOfSelectedItem)
@@ -368,11 +613,42 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         return result
     }
+    @discardableResult func reviewChanges(confirmApply: Bool = false) -> Bool {
+        window.makeFirstResponder(nil); collect()
+        let edits = changes(), original = snapshot["config"] as? [String: Any] ?? [:]
+        let alert = NSAlert(); alert.messageText = edits.isEmpty ? "No unsaved changes" : "Review your changes"
+        alert.informativeText = "Save to \(saveScope == 1 ? "shared dotfiles" : "this Mac’s overrides"). " + (confirmApply ? "Applying rebuilds helpers and reloads Hangar on this Mac." : "These are edits since you opened or last saved this form. Saved settings activate only when applied.")
+        var lines: [String] = []
+        func display(_ value: Any?) -> String {
+            guard let value = value else { return "unset" }
+            if let flag = value as? Bool, !(value is String) { return flag ? "enabled" : "disabled" }
+            return String(describing: value)
+        }
+        for key in edits.keys.sorted() {
+            if let values = edits[key] as? [String: Any] {
+                let old = original[key] as? [String: Any] ?? [:]
+                for name in values.keys.sorted() { lines.append("\(key).\(name)\n  \(display(old[name])) → \(display(values[name]))") }
+            } else { lines.append("\(key)\n  \(display(original[key])) → \(display(edits[key]))") }
+        }
+        if !lines.isEmpty {
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 460, height: min(280, CGFloat(lines.count * 48 + 20))))
+            scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
+            let text = NSTextView(frame: scroll.bounds); text.isEditable = false; text.isSelectable = true
+            text.font = .monospacedSystemFont(ofSize: 11, weight: .regular); text.string = lines.joined(separator: "\n\n")
+            text.textContainerInset = NSSize(width: 8, height: 8); text.isVerticallyResizable = true
+            text.autoresizingMask = .width; text.textContainer?.widthTracksTextView = true
+            scroll.documentView = text; alert.accessoryView = scroll
+        }
+        if confirmApply { alert.addButton(withTitle: "Keep editing"); alert.addButton(withTitle: "Save & Apply") }
+        else { alert.addButton(withTitle: "Done") }
+        return alert.runModal() == .alertSecondButtonReturn
+    }
     func save(apply: Bool) {
         guard !busy, !snapshot.isEmpty else { return }
         window.makeFirstResponder(nil)
         collect(); let edits = changes()
         if edits.isEmpty { if apply { activate() } else { status.stringValue = "Nothing to save." }; return }
+        if apply && !reviewChanges(confirmApply: true) { return }
         let payload: [String: Any] = ["revision": snapshot["revision"] ?? "", "changes": edits, "scope": saveScope == 1 ? "shared" : "local"]
         let path = FileManager.default.temporaryDirectory.appendingPathComponent("hangar-settings-\(UUID().uuidString).json")
         do { let data = try JSONSerialization.data(withJSONObject: payload); guard FileManager.default.createFile(atPath: path.path, contents: data, attributes: [.posixPermissions: 0o600]) else { throw CocoaError(.fileWriteUnknown) } } catch { fail(error.localizedDescription); return }
@@ -392,7 +668,7 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     func buildUtilities() {
-        heading("Quick Install", "Useful Mac apps, installed only when you choose.")
+        heading("Quick Install", "Useful Mac utilities, installed only when you choose.")
         if catalog.isEmpty && !preview {
             add(label("Checking installed apps…", color: .secondaryLabelColor))
             setBusy(true, "Checking available utilities…")
@@ -404,13 +680,31 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             return
         }
-        for entry in catalog {
+        let search = NSSearchField(); search.placeholderString = "Find an app or tool"; search.stringValue = utilityQuery
+        search.delegate = self; search.setAccessibilityLabel("Search optional utilities"); utilitySearch = search; add(search)
+        let list = stack([], spacing: 20); catalogList = list; add(list)
+        renderUtilities()
+        add(label("Keep overlapping window shortcuts unassigned in other utilities.", size: 11, color: .secondaryLabelColor))
+    }
+    func controlTextDidChange(_ notification: Notification) {
+        guard let search = notification.object as? NSSearchField, search === utilitySearch else { return }
+        utilityQuery = search.stringValue; renderUtilities()
+    }
+    func renderUtilities() {
+        guard let list = catalogList else { return }
+        list.arrangedSubviews.forEach { list.removeArrangedSubview($0); $0.removeFromSuperview() }
+        let query = utilityQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let entries = catalog.filter { entry in
+            query.isEmpty || ["name", "summary", "category", "notes"].compactMap { entry[$0] as? String }.joined(separator: " ").localizedCaseInsensitiveContains(query)
+        }
+        if entries.isEmpty { list.addArrangedSubview(label("No utilities match. Clear the search to see all options.", size: 12, color: .secondaryLabelColor)) }
+        for entry in entries {
             let id = entry["id"] as? String ?? "", name = entry["name"] as? String ?? id
             let installed = entry["installed"] as? Bool ?? false
             let available = entry["available"] as? Bool ?? false
-            let symbol = ["tinycast":"command", "shottr":"camera.viewfinder", "thaw":"menubar.rectangle", "localsend":"arrow.up.arrow.down", "iina":"play.rectangle", "stats":"chart.xyaxis.line"][id] ?? "app"
+            let symbol = ["tinycast":"command", "shottr":"camera.viewfinder", "thaw":"menubar.rectangle", "localsend":"arrow.up.arrow.down", "iina":"play.rectangle", "stats":"chart.xyaxis.line", "mole":"terminal"][id] ?? "app"
             let icon: NSImageView
-            if installed, let path = entry["installed_path"] as? String {
+            if installed, entry["type"] as? String != "cli", let path = entry["installed_path"] as? String {
                 icon = NSImageView(image: NSWorkspace.shared.icon(forFile: path))
             } else {
                 icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
@@ -420,23 +714,28 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let text = stack([label(name, size: 14, weight: .semibold), label(entry["summary"] as? String ?? "", size: 12, color: .secondaryLabelColor)], spacing: 4)
             let terms = [entry["license"] as? String, entry["pricing"] as? String].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
             if !terms.isEmpty { text.addArrangedSubview(label(terms, size: 11, color: .tertiaryLabelColor)) }
-            let install = ActionButton(installed ? "Open" : "Install") {
+            let launchLabel = entry["launch_label"] as? String ?? "Open"
+            let install = ActionButton(installed ? launchLabel : "Install") {
                 if installed {
-                    guard let path = entry["installed_path"] as? String else { self.fail("The installed app location is missing. Reload the utility catalog and try again."); return }
-                    if !NSWorkspace.shared.open(URL(fileURLWithPath: path)) { self.fail("macOS could not open \(name). Check that it is still in Applications, then reload the utility catalog.") }
+                    self.setBusy(true, "Opening \(name)…")
+                    self.run(["utilities", "open", id, "--json"]) { code, out, err in
+                        if code == 0 { self.setBusy(false, "Launch requested.") }
+                        else { self.fail(self.object(out)?["message"] as? String ?? (err.isEmpty ? out : err)) }
+                    }
                     return
                 }
                 self.install(entry)
             }
-            install.isEnabled = installed || available
+            install.isEnabled = installed ? entry["launch_available"] as? Bool ?? true : available
             let website = ActionButton("About", symbol: "arrow.up.right") { if let s = entry["homepage"] as? String, let u = URL(string: s), u.scheme == "https" { NSWorkspace.shared.open(u) } }
             install.controlSize = .small; website.controlSize = .small
             install.setAccessibilityLabel(installed ? "Open \(name)" : "Install \(name)")
             let actions = stack([install, website], spacing: 6)
-            actions.widthAnchor.constraint(equalToConstant: 78).isActive = true
+            let actionWidth: CGFloat = installed && entry["type"] as? String == "cli" ? 160 : 78
+            actions.widthAnchor.constraint(equalToConstant: actionWidth).isActive = true
             let summary = stack([icon, text, actions], vertical: false, spacing: 12)
             text.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            text.widthAnchor.constraint(equalTo: summary.widthAnchor, constant: -140).isActive = true
+            text.widthAnchor.constraint(equalTo: summary.widthAnchor, constant: -(62 + actionWidth)).isActive = true
             let rows = stack([summary], spacing: 9)
             summary.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
             for key in ["notes", "consent_message", "reason"] {
@@ -448,9 +747,8 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             let padded = NSView(); rows.translatesAutoresizingMaskIntoConstraints = false; padded.addSubview(rows)
             NSLayoutConstraint.activate([rows.topAnchor.constraint(equalTo: padded.topAnchor, constant: 11), rows.bottomAnchor.constraint(equalTo: padded.bottomAnchor, constant: -11), rows.leadingAnchor.constraint(equalTo: padded.leadingAnchor), rows.trailingAnchor.constraint(equalTo: padded.trailingAnchor)])
-            group(rows: [padded])
+            group(rows: [padded], container: list)
         }
-        add(label("Keep overlapping window shortcuts unassigned in other utilities.", size: 11, color: .secondaryLabelColor))
     }
     func install(_ entry: [String: Any]) {
         guard !busy, entry["available"] as? Bool == true, let id = entry["id"] as? String else { return }
@@ -479,6 +777,33 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         diagnose.controlSize = .small
         group(rows: [row("Diagnostics", diagnose, detail: "Permissions, shortcuts and installed helpers.")])
+        let rebuild = ActionButton("Rebuild & Apply…") {
+            self.collect()
+            guard self.changes().isEmpty else { self.status.stringValue = "Save or discard your draft before rebuilding saved settings."; return }
+            let alert = NSAlert(); alert.messageText = "Rebuild Hangar from saved settings?"
+            alert.informativeText = "Compiles the installed source kit, rebuilds native helpers and reloads Hangar. The previous installation is backed up."
+            alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Rebuild & Apply")
+            if alert.runModal() == .alertSecondButtonReturn { self.activate() }
+        }
+        rebuild.controlSize = .small
+        group(rows: [row("Installed helpers", rebuild, detail: "Hangar \(snapshot["version"] as? String ?? "unknown")")], detail: "Run checks to verify signatures and versions. Rebuild repairs missing or outdated helpers using saved configuration.")
+        let export = ActionButton("Export…", symbol: "square.and.arrow.up") {
+            let panel = NSSavePanel(); panel.nameFieldStringValue = "hangar-diagnostics.json"; panel.allowedContentTypes = [.json]
+            panel.beginSheetModal(for: self.window) { reply in
+                guard reply == .OK, let destination = panel.url else { return }
+                self.setBusy(true, "Preparing portable diagnostics…")
+                self.run(["doctor", "--portable"]) { code, out, err in
+                    guard code <= 2, let report = self.object(out), report["kind"] as? String == "hangar-diagnostics" else { self.fail(err.isEmpty ? out : err); return }
+                    do {
+                        try Data(out.utf8).write(to: destination, options: .atomic)
+                        self.setBusy(false, "Diagnostics exported. Review the file before sharing.")
+                        NSWorkspace.shared.activateFileViewerSelecting([destination])
+                    } catch { self.fail(error.localizedDescription) }
+                }
+            }
+        }
+        export.controlSize = .small
+        group(rows: [row("Portable report", export, detail: "Version and diagnostic statuses only.")], detail: "Excludes personal paths, machine names, display IDs, window titles, app lists and reminder contents. Nothing is uploaded.")
         if !diagnostics.isEmpty {
             group("Results", rows: diagnostics.map { check in
                 let status = check["status"] as? String ?? ""
@@ -504,7 +829,11 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func loadFixture() {
         snapshot = ["version":"preview", "revision":"fixture", "profiles":["default","numbered-study"], "config":["profile":"default","shelf_style":"compact","apps":["terminal":"Terminal","browser":"Safari","finder":"Finder"], "hotkeys":["overview":"alt-o","picker_search":"ctrl-alt-cmd-w","shelf":"ctrl-alt-cmd-a","settings":"ctrl-alt-cmd-comma","palette":"ctrl-alt-cmd-slash","terminal":"ctrl-alt-cmd-return","browser":"ctrl-alt-cmd-b","finder":"ctrl-alt-cmd-e","menu_bar":"ctrl-alt-cmd-m","menu_search":"ctrl-alt-cmd-p","reload":"ctrl-alt-cmd-r","management_toggle":"ctrl-alt-cmd-escape","snap_left":"alt-left","snap_right":"alt-right","snap_up":"alt-up","snap_down":"alt-down","pair":"alt-p","separate":"alt-shift-p","layout_menu":"alt-g","gather":"ctrl-alt-cmd-s","mx_picker":"f17"], "modules":["shelf":true]]]
-        draft = snapshot["config"] as! [String: Any]
+        let fixture = snapshot["config"] as! [String: Any]
+        snapshot["defaults"] = ["hotkeys": fixture["hotkeys"] ?? [:]]
+        snapshot["provenance"] = ["profile":"local", "apps.terminal":"shared", "apps.browser":"default", "apps.finder":"default", "shelf_style":"shared", "modules.shelf":"default", "hotkeys.overview":"shared", "hotkeys.picker_search":"default"]
+        snapshot["profile_details"] = ["default":["description":"Tiled workspaces W (Work), B (Browser), S (Social) and M (Media). Work and Browser prefer the main display; Social and Media prefer a secondary display, falling back to main."]]
+        draft = fixture
         catalog = [["id":"tinycast","name":"Tinycast","summary":"Launcher, clipboard, snippets and extensions. Your everyday commands in one native palette.","license":"AGPL-3.0","pricing":"Free and open source","available":true,"consent_required":true,"consent_message":"This self-signed build requires your consent before the installer removes macOS quarantine."], ["id":"shottr","name":"Shottr","summary":"Fast screenshots, annotations and text recognition.","license":"Proprietary","pricing":"Free use with reminders; paid license required for commercial use","installed":true], ["id":"thaw","name":"Thaw","summary":"Keep your menu bar organized and reachable.","license":"GPL-3.0","pricing":"Free and open source","available":false,"reason":"Requires macOS 26 or later."]]
         setBusy(false, "Preview · no settings are read or changed."); select(requestedTab, collect: false)
     }
