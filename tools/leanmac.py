@@ -23,7 +23,7 @@ import tempfile
 import time
 import tomllib
 
-VERSION = '2026.10.05.3'
+VERSION = '2026.10.05.4'
 USER_DIR = Path.home()
 # Stable storage namespace shared with existing LeanMac installations.
 STATE = USER_DIR / 'Library/Application Support/LeanMac'

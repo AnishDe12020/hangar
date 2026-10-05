@@ -1,6 +1,6 @@
 local U = require('hangar-config')
 -- Hangar: AeroSpace owns windows; Hammerspoon owns utility shortcuts.
-local M = {version = '2026.10.05.3'}
+local M = {version = '2026.10.05.4'}
 local cli = hs.fs.attributes('/opt/homebrew/bin/aerospace') and '/opt/homebrew/bin/aerospace' or '/usr/local/bin/aerospace'
 M.tasks = {}
 local function aero(args)
