@@ -37,6 +37,6 @@ In the overview, click a card to focus its exact window. Drag it to another colu
 
 Snapping floats a window, taking it out of a tiled pair. Use ⌥P to pair it again. Pairing and moving can briefly change the focused workspace while AeroSpace reconstructs the two selected windows.
 
-In Apron, ⌘F finds shelf items, ⇧⌘C copies the selected text/image/link contents, ⌘C copies items, Space opens Quick Look, Return opens an item, and Delete removes references. Escape clears the search before closing it. Quick Tools and Share are in the item menu.
+In Apron, ⌘F finds shelf items, ⇧⌘C copies the selected text/image/link contents, ⌘C copies items, Space previews files or reads captured text, Return opens files or copies text, and Delete removes references. Escape clears the search before closing it. Quick Tools and Share are in the item menu.
 
 Keep-awake, focus timers and quick reminders are available from the Hangar menu and command palette without adding more global shortcuts. Open Ground Control → Sessions for their full controls.

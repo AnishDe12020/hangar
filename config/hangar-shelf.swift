@@ -94,7 +94,7 @@ final class ShelfStore {
             }
         }
     }
-    func addData(_ data: Data, name: String, kind: ItemKind, groupID: UUID? = nil) throws {
+    func addData(_ data: Data, name: String, kind: ItemKind, groupID: UUID? = nil, displayName: String? = nil) throws {
         let target = groupID ?? state.active
         guard let index = state.groups.firstIndex(where: { $0.id == target }) else { throw ShelfError.invalid("The destination shelf no longer exists.") }
         guard data.count <= 128 * 1024 * 1024 else { throw ShelfError.invalid("This clipboard item is too large. Save it as a file, then add the file.") }
@@ -104,14 +104,22 @@ final class ShelfStore {
         do {
             try data.write(to: destination, options: .atomic)
             let relative = folder.lastPathComponent + "/" + destination.lastPathComponent
-            try change { $0.groups[index].items.append(ShelfItem(kind: kind, name: destination.lastPathComponent, location: relative)) }
+            try change { $0.groups[index].items.append(ShelfItem(kind: kind, name: displayName ?? destination.lastPathComponent, location: relative)) }
         } catch { try? FileManager.default.removeItem(at: folder); throw error }
     }
     func addText(_ value: String) throws {
         guard !value.isEmpty else { return }
-        let title = value.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Note"
-        let sanitized = String(title.prefix(48)).replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
-        try addData(Data(value.utf8), name: (sanitized.isEmpty ? "Note" : sanitized) + ".txt", kind: .text)
+        let data = Data(value.utf8)
+        guard data.count <= 16 * 1024 * 1024 else { throw ShelfError.invalid("This text is too large for a snippet. Save it as a file, then add the file.") }
+        let title = value.split(whereSeparator: \.isNewline).first.map { String($0.prefix(48)) } ?? "Text"
+        try addData(data, name: "Text.txt", kind: .text, displayName: title)
+    }
+    func text(for item: ShelfItem) throws -> String {
+        guard item.kind == .text, let url = url(for: item),
+              let value = String(data: try readBoundedFile(url, limit: 128 * 1024 * 1024), encoding: .utf8) else {
+            throw ShelfError.invalid("This saved text is unavailable. Add it again from its source.")
+        }
+        return value
     }
     func addLink(_ url: URL) throws {
         guard ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") else { throw ShelfError.invalid("Only web and email links can be added as links.") }
@@ -492,7 +500,7 @@ final class ShelfGrid: NSCollectionView {
             case 49: shelf?.preview(nil); return
             case 36, 76: shelf?.openItems(nil); return
             case 51, 117: shelf?.removeItems(nil); return
-            case 53: window?.orderOut(nil); return
+            case 53: shelf?.closeShelf(nil); return
             default: break
             }
         }
@@ -536,8 +544,46 @@ final class TileBackground: NSView {
         NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 10, yRadius: 10).fill()
     }
 }
+final class SnippetCard: NSView {
+    let text = NSTextField(wrappingLabelWithString: "")
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        text.translatesAutoresizingMaskIntoConstraints = false; text.maximumNumberOfLines = 4
+        text.lineBreakMode = .byWordWrapping; text.isSelectable = false; text.isEditable = false
+        text.setAccessibilityElement(false)
+        addSubview(text)
+        NSLayoutConstraint.activate([text.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
+            text.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
+            text.topAnchor.constraint(equalTo: topAnchor, constant: 5),
+            text.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -5)])
+    }
+    required init?(coder: NSCoder) { nil }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.textBackgroundColor.withAlphaComponent(0.9).setFill()
+        let card = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+        card.fill(); NSColor.separatorColor.setStroke(); card.lineWidth = 1; card.stroke()
+    }
+}
+final class TextPreviewController: NSViewController {
+    let text: String
+    init(text: String) { self.text = text; super.init(nibName: nil, bundle: nil) }
+    required init?(coder: NSCoder) { nil }
+    override func loadView() {
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 300))
+        scroll.hasVerticalScroller = true
+        let content = NSTextView(frame: scroll.bounds)
+        content.isEditable = false; content.isSelectable = true; content.isRichText = false
+        content.font = .systemFont(ofSize: 13); content.textColor = .textColor; content.string = text
+        content.textContainerInset = NSSize(width: 12, height: 12); content.isVerticallyResizable = true
+        content.autoresizingMask = .width; content.textContainer?.widthTracksTextView = true
+        content.setAccessibilityLabel("Captured text")
+        scroll.documentView = content; view = scroll
+    }
+}
 final class ShelfThumbnail: NSCollectionViewItem {
     let picture = NSImageView(), nameLabel = NSTextField(wrappingLabelWithString: "")
+    let snippet = SnippetCard()
     var representedID: UUID?, request: QLThumbnailGenerator.Request?
     var imageDimensions = [NSLayoutConstraint]()
     var imageOperation: Operation?, representationKey: NSString?
@@ -549,13 +595,15 @@ final class ShelfThumbnail: NSCollectionViewItem {
     override var isSelected: Bool { didSet { (view as? TileBackground)?.selected = isSelected; view.setAccessibilitySelected(isSelected) } }
     override func loadView() {
         view = TileBackground(frame: NSRect(x: 0, y: 0, width: 96, height: 112))
-        for subview in [picture, nameLabel] { subview.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(subview) }
+        for subview in [picture, snippet, nameLabel] { subview.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(subview) }
         picture.imageScaling = .scaleProportionallyUpOrDown
         nameLabel.font = .systemFont(ofSize: 10, weight: .regular); nameLabel.alignment = .center; nameLabel.maximumNumberOfLines = 2; nameLabel.lineBreakMode = .byTruncatingMiddle
         imageDimensions = [picture.widthAnchor.constraint(equalToConstant: 60), picture.heightAnchor.constraint(equalToConstant: 60)]
         NSLayoutConstraint.activate(imageDimensions)
         NSLayoutConstraint.activate([
             picture.centerXAnchor.constraint(equalTo: view.centerXAnchor), picture.topAnchor.constraint(equalTo: view.topAnchor, constant: 7),
+            snippet.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4), snippet.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4),
+            snippet.topAnchor.constraint(equalTo: picture.topAnchor), snippet.heightAnchor.constraint(equalTo: picture.heightAnchor),
             nameLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4), nameLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4),
             nameLabel.topAnchor.constraint(equalTo: picture.bottomAnchor, constant: 5), nameLabel.heightAnchor.constraint(lessThanOrEqualToConstant: 29)
         ])
@@ -573,7 +621,7 @@ final class ShelfThumbnail: NSCollectionViewItem {
         imageDimensions.forEach { $0.constant = style.thumbnailSize }
         nameLabel.font = .systemFont(ofSize: style == .compact ? 10 : 11, weight: .regular)
         picture.imageScaling = .scaleProportionallyUpOrDown
-        picture.contentTintColor = nil
+        picture.contentTintColor = nil; picture.isHidden = false; snippet.isHidden = true
         guard let url = url, !url.isFileURL || FileManager.default.fileExists(atPath: url.path) else {
             picture.image = NSImage(systemSymbolName: "questionmark.folder", accessibilityDescription: "File unavailable"); picture.contentTintColor = .secondaryLabelColor
             let recovery = item.kind == .file ? "Use Locate Original from the item’s menu to reconnect it." : "The saved import is missing. Add it again from its source."
@@ -585,6 +633,24 @@ final class ShelfThumbnail: NSCollectionViewItem {
         let kind = item.kind == .link ? "link" : item.kind == .text ? "text note" : item.kind == .image ? "image" : "file"
         view.setAccessibilityLabel(item.name + ", " + kind)
         view.setAccessibilityHelp("Space to preview. Return to open. Delete removes only the shelf reference.")
+        if item.kind == .text {
+            do {
+                let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+                guard values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? Int.max) <= 128 * 1024 * 1024 else { throw ShelfError.invalid("Text unavailable") }
+                let file = try FileHandle(forReadingFrom: url); defer { try? file.close() }
+                let preview = String(decoding: try file.read(upToCount: 2048) ?? Data(), as: UTF8.self)
+                snippet.text.stringValue = String(preview.prefix(512)); snippet.text.font = .systemFont(ofSize: style == .compact ? 10 : 12)
+                snippet.text.maximumNumberOfLines = style == .compact ? 3 : 5
+                picture.isHidden = true; snippet.isHidden = false; nameLabel.stringValue = "Text"
+                view.toolTip = preview; view.setAccessibilityLabel("Text: " + String(preview.prefix(160)))
+                view.setAccessibilityHelp("Command C or Return copies text. Drag into a text field. Space reads the full snippet. Delete removes it from the shelf.")
+            } catch {
+                picture.image = NSImage(systemSymbolName: "text.badge.xmark", accessibilityDescription: "Text unavailable")
+                nameLabel.stringValue = "Text unavailable"; nameLabel.textColor = .secondaryLabelColor
+                view.toolTip = "The saved text is unavailable. Add it again from its source."
+            }
+            return
+        }
         if item.kind == .link {
             picture.image = NSImage(systemSymbolName: "link", accessibilityDescription: "Web link")?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: style == .compact ? 28 : 38, weight: .regular)); picture.imageScaling = .scaleNone; picture.contentTintColor = .secondaryLabelColor; return
         }
@@ -650,6 +716,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
     var visibleItems = [ShelfItem](), selectedIDs = Set<UUID>()
     var updatingSelection = false
     var sharingPicker: NSSharingServicePicker?
+    var textPreview: NSPopover?
     var activeTool: ToolCancellation?
     var quitAfterWork = false, quitReplySent = false
     var terminationReply: (Bool) -> Void = { NSApp.reply(toApplicationShouldTerminate: $0) }
@@ -766,16 +833,32 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
             let y = min(max(point.y - size.height + 72, bounds.minY + 16), max(bounds.minY + 16, bounds.maxY - size.height - 16))
             panel.setFrameOrigin(NSPoint(x: x, y: y))
         }
-        refresh(); panel.orderFrontRegardless()
+        refresh(); presentShelf(activate: false)
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { show(); return true }
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
         perform { try store.addFiles(filenames.map { URL(fileURLWithPath: $0) }) }; show(); sender.reply(toOpenOrPrint: .success)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-    func windowShouldClose(_ sender: NSWindow) -> Bool { QLPreviewPanel.sharedPreviewPanelExists() ? QLPreviewPanel.shared()?.orderOut(nil) : (); sender.orderOut(nil); return false }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { closeShelf(nil); return false }
     func windowDidBecomeKey(_ notification: Notification) { refresh(preservingSelection: true) }
-    func show() { panel.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); panel.makeFirstResponder(grid) }
+    func show() { presentShelf(activate: true) }
+    func presentShelf(activate: Bool) {
+        let entering = !panel.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if entering { panel.alphaValue = 0 }
+        if activate { panel.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); panel.makeFirstResponder(grid) }
+        else { panel.orderFrontRegardless() }
+        guard entering else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18; context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+        }
+        // Animate the presentation layer, keeping the window and drop target fixed.
+        let lift = CABasicAnimation(keyPath: "transform.translation.y")
+        lift.fromValue = -8; lift.toValue = 0; lift.duration = 0.2
+        lift.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        surface.layer?.add(lift, forKey: "ApronReveal")
+    }
     func label(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor = .labelColor) -> NSTextField {
         let field = NSTextField(labelWithString: text); field.font = .systemFont(ofSize: size, weight: weight); field.textColor = color; return field
     }
@@ -820,7 +903,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         grid.isSelectable = true; grid.allowsMultipleSelection = true; grid.dataSource = self; grid.delegate = self
         grid.register(ShelfThumbnail.self, forItemWithIdentifier: NSUserInterfaceItemIdentifier("Thumbnail"))
         grid.registerForDraggedTypes(dragTypes); grid.setDraggingSourceOperationMask(.copy, forLocal: false); grid.setDraggingSourceOperationMask(.copy, forLocal: true)
-        grid.setAccessibilityLabel("Shelf files"); grid.setAccessibilityHelp("Select files and drag them out together. Space previews, Return opens, Delete removes from the shelf.")
+        grid.setAccessibilityLabel("Shelf items"); grid.setAccessibilityHelp("Select items to copy or drag. Space previews, Return opens files or copies text, Delete removes from the shelf.")
         let menu = NSMenu(); menu.delegate = self; grid.menu = menu
         scroll.documentView = grid; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.drawsBackground = false; scroll.borderType = .noBorder
         let dropIcon = NSImageView(image: NSImage(systemSymbolName: "tray", accessibilityDescription: nil)!); dropIcon.contentTintColor = .secondaryLabelColor; dropIcon.imageScaling = .scaleProportionallyUpOrDown
@@ -898,7 +981,9 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         effect.isHidden = opaque || usesGlass; surface.drawsOpaqueBackground = opaque
         surface.layer?.backgroundColor = NSColor.clear.cgColor
         panel.isOpaque = opaque; panel.backgroundColor = opaque ? .windowBackgroundColor : .clear
-        // No repeating animations. All state changes remain immediate with Reduce Motion.
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            surface.layer?.removeAnimation(forKey: "ApronReveal"); panel.alphaValue = 1
+        }
     }
     func buildMenu() {
         let main = NSMenu(), appItem = NSMenuItem(), editItem = NSMenuItem(), fileItem = NSMenuItem()
@@ -914,7 +999,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         addMenu(file, "Close Shelf Window", #selector(closeShelf(_:)), key: "w")
         let edit = NSMenu(title: "Edit"); editItem.submenu = edit
         edit.addItem(withTitle: "Undo", action: #selector(ShelfGrid.undo(_:)), keyEquivalent: "z")
-        edit.addItem(withTitle: "Copy Items", action: #selector(ShelfGrid.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Copy", action: #selector(ShelfGrid.copy(_:)), keyEquivalent: "c")
         let contents = addMenu(edit, "Copy Contents", #selector(copyContents(_:)), key: "c"); contents.keyEquivalentModifierMask = [.command, .shift]
         addMenu(edit, "Find in Shelf…", #selector(findItems(_:)), key: "f")
         edit.addItem(withTitle: "Paste", action: #selector(ShelfGrid.paste(_:)), keyEquivalent: "v")
@@ -1003,7 +1088,14 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         selectedIDs.subtract(visibleItems.map(\.id)); selectedIDs.formUnion(selected.map(\.id))
         updateSelectionStatus(); if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared()?.isVisible == true { updatePreview() } }
     func collectionView(_ collectionView: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
-        guard visibleItems.indices.contains(indexPath.item), let url = store.url(for: visibleItems[indexPath.item]), !url.isFileURL || FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard visibleItems.indices.contains(indexPath.item) else { return nil }
+        return try? pasteboardWriter(for: visibleItems[indexPath.item])
+    }
+    func pasteboardWriter(for item: ShelfItem) throws -> NSPasteboardWriting {
+        if item.kind == .text {
+            let payload = NSPasteboardItem(); payload.setString(try store.text(for: item), forType: .string); return payload
+        }
+        guard let url = store.url(for: item), !url.isFileURL || FileManager.default.fileExists(atPath: url.path) else { throw ShelfError.invalid("A selected item is unavailable. Locate its original before copying.") }
         return url as NSURL
     }
     func collectionView(_ collectionView: NSCollectionView, validateDrop info: NSDraggingInfo, proposedIndexPath: AutoreleasingUnsafeMutablePointer<NSIndexPath>, dropOperation: UnsafeMutablePointer<NSCollectionView.DropOperation>) -> NSDragOperation {
@@ -1068,14 +1160,15 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let hasSelection = !selected.isEmpty
-        addMenu(menu, "Quick Look", #selector(preview(_:))).isEnabled = hasSelection
-        addMenu(menu, "Open", #selector(openItems(_:))).isEnabled = hasSelection
-        addMenu(menu, "Reveal in Finder", #selector(revealItems(_:))).isEnabled = hasSelection
+        let onlyText = hasSelection && selected.allSatisfy { $0.kind == .text }
+        addMenu(menu, selected.count == 1 && onlyText ? "Preview Text" : "Quick Look", #selector(preview(_:))).isEnabled = hasSelection
+        if !selected.contains(where: { $0.kind == .text }) { addMenu(menu, "Open", #selector(openItems(_:))).isEnabled = hasSelection }
+        addMenu(menu, "Reveal in Finder", #selector(revealItems(_:))).isEnabled = !selectedLocalURLs.isEmpty
         menu.addItem(.separator())
         addMenu(menu, "Share…", #selector(shareItems(_:))).isEnabled = hasSelection
-        addMenu(menu, "Copy Items", #selector(copyItems(_:))).isEnabled = hasSelection
-        addMenu(menu, "Copy Contents", #selector(copyContents(_:))).isEnabled = canCopyContents
-        addMenu(menu, "Copy Paths / Links", #selector(copyPaths(_:))).isEnabled = hasSelection
+        addMenu(menu, onlyText ? "Copy Text" : "Copy Items", #selector(copyItems(_:))).isEnabled = hasSelection
+        if !onlyText { addMenu(menu, "Copy Contents", #selector(copyContents(_:))).isEnabled = canCopyContents }
+        if !selected.contains(where: { $0.kind == .text }) { addMenu(menu, "Copy Paths / Links", #selector(copyPaths(_:))).isEnabled = hasSelection }
         if selected.count == 1, selected[0].kind == .file { addMenu(menu, "Locate Original…", #selector(locateOriginal(_:))) }
         if store.state.groups.count > 1 && hasSelection {
             let move = NSMenuItem(title: "Move to Shelf", action: nil, keyEquivalent: ""), submenu = NSMenu()
@@ -1090,7 +1183,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         addMenu(menu, "Remove from Shelf", #selector(removeItems(_:))).isEnabled = hasSelection
         menu.autoenablesItems = false
     }
-    var selectedLocalURLs: [URL] { selected.compactMap(store.url).filter(\.isFileURL) }
+    var selectedLocalURLs: [URL] { selected.filter { $0.kind != .text }.compactMap(store.url).filter(\.isFileURL) }
     func addQuickTools(to menu: NSMenu) {
         let item = NSMenuItem(title: "Quick Tools", action: nil, keyEquivalent: ""), tools = NSMenu()
         let urls = selectedLocalURLs, idle = activeTool == nil && panel.attachedSheet == nil
@@ -1229,22 +1322,33 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         open.beginSheetModal(for: panel) { [weak self] response in guard response == .OK, let self = self else { return }; self.perform { try self.store.addFiles(open.urls) } }
     }
     @objc func pasteItems(_ sender: Any?) { importPasteboard(.general) }
-    @objc func closeShelf(_ sender: Any?) { if QLPreviewPanel.sharedPreviewPanelExists() { QLPreviewPanel.shared()?.orderOut(nil) }; panel.orderOut(nil) }
+    @objc func closeShelf(_ sender: Any?) { textPreview?.close(); if QLPreviewPanel.sharedPreviewPanelExists() { QLPreviewPanel.shared()?.orderOut(nil) }; panel.orderOut(nil); panel.alphaValue = 1; surface.layer?.removeAnimation(forKey: "ApronReveal") }
     @objc func changeShelf(_ sender: Any?) {
         do { try store.selectGroup(store.state.groups[shelfPicker.indexOfSelectedItem].id); searchField.stringValue = ""; refresh() }
         catch { report(error) }
     }
     @objc func openItems(_ sender: Any?) {
+        if selected.contains(where: { $0.kind == .text }) { copyItems(sender); return }
         for item in selected {
             guard let url = store.url(for: item), !url.isFileURL || FileManager.default.fileExists(atPath: url.path) else { report(ShelfError.invalid("\(item.name) is unavailable. Use Locate Original to reconnect it.")); return }
             if !NSWorkspace.shared.open(url) { report(ShelfError.invalid("macOS could not open \(item.name).")); return }
         }
     }
-    @objc func revealItems(_ sender: Any?) { let urls = selected.compactMap(store.url).filter { $0.isFileURL }; if !urls.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(urls) } }
+    @objc func revealItems(_ sender: Any?) { if !selectedLocalURLs.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(selectedLocalURLs) } }
     @objc func copyItems(_ sender: Any?) {
-        let urls = selected.compactMap(store.url)
-        guard !urls.isEmpty else { return }
-        NSPasteboard.general.clearContents(); NSPasteboard.general.writeObjects(urls.map { $0 as NSURL }); status.stringValue = "Copied \(urls.count) \(urls.count == 1 ? "item" : "items")"
+        guard !selected.isEmpty else { return }
+        do { try writeItems(selected, to: .general); status.stringValue = selected.allSatisfy { $0.kind == .text } ? "Copied text" : "Copied \(selected.count) items" }
+        catch { report(error) }
+    }
+    func writeItems(_ items: [ShelfItem], to pasteboard: NSPasteboard) throws {
+        guard !items.isEmpty else { return }
+        let payloads: [NSPasteboardWriting]
+        if items.allSatisfy({ $0.kind == .text }) {
+            let text = try items.map { try store.text(for: $0) }.joined(separator: "\n\n")
+            let payload = NSPasteboardItem(); payload.setString(text, forType: .string); payloads = [payload]
+        } else { payloads = try items.map { try pasteboardWriter(for: $0) } }
+        pasteboard.clearContents()
+        guard pasteboard.writeObjects(payloads) else { throw ShelfError.invalid("macOS could not copy these items.") }
     }
     var canCopyContents: Bool { selected.count == 1 && [.text, .image, .link].contains(selected[0].kind) }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -1253,10 +1357,14 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         return true
     }
     @objc func shareItems(_ sender: Any?) {
-        let urls = selected.compactMap(store.url)
-        guard !urls.isEmpty else { return }
-        guard urls.allSatisfy({ !$0.isFileURL || FileManager.default.fileExists(atPath: $0.path) }) else { report(ShelfError.invalid("A selected file is unavailable. Locate its original before sharing.")); return }
-        sharingPicker = NSSharingServicePicker(items: urls)
+        guard !selected.isEmpty else { return }
+        let items: [Any]
+        do { items = try selected.map { item -> Any in
+            if item.kind == .text { return try store.text(for: item) }
+            guard let url = store.url(for: item), !url.isFileURL || FileManager.default.fileExists(atPath: url.path) else { throw ShelfError.invalid("A selected file is unavailable. Locate its original before sharing.") }
+            return url
+        } } catch { report(error); return }
+        sharingPicker = NSSharingServicePicker(items: items)
         let anchor = toolbar ?? surface
         sharingPicker?.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
     }
@@ -1267,9 +1375,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         case .link:
             payload.setString(url.absoluteString, forType: .URL); payload.setString(url.absoluteString, forType: .string)
         case .text:
-            let data = try readBoundedFile(url, limit: 16 * 1024 * 1024)
-            guard let text = String(data: data, encoding: .utf8) else { throw ShelfError.invalid("This note could not be read as text.") }
-            payload.setString(text, forType: .string)
+            payload.setString(try store.text(for: item), forType: .string)
         case .image:
             let data = try readBoundedFile(url, limit: 128 * 1024 * 1024)
             payload.setData(data, forType: .png)
@@ -1284,6 +1390,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         catch { report(error) }
     }
     @objc func copyPaths(_ sender: Any?) {
+        guard !selected.contains(where: { $0.kind == .text }) else { return }
         let paths = selected.compactMap(store.url).map { $0.isFileURL ? $0.path : $0.absoluteString }
         guard !paths.isEmpty else { return }; NSPasteboard.general.clearContents(); NSPasteboard.general.setString(paths.joined(separator: "\n"), forType: .string); status.stringValue = "Copied paths and links"
     }
@@ -1305,12 +1412,24 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         }
     }
     @objc func preview(_ sender: Any?) {
+        if textPreview?.isShown == true { textPreview?.close(); return }
+        if selected.count == 1, let item = selected.first, item.kind == .text {
+            do {
+                if QLPreviewPanel.sharedPreviewPanelExists() { QLPreviewPanel.shared()?.orderOut(nil) }
+                let popover = NSPopover(); popover.behavior = .transient
+                popover.contentViewController = TextPreviewController(text: try store.text(for: item))
+                popover.contentSize = NSSize(width: 420, height: 300); textPreview = popover
+                let anchor = grid.selectionIndexPaths.first.flatMap { grid.item(at: $0)?.view } ?? surface
+                popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxX)
+            } catch { report(error) }
+            return
+        }
         if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared()?.isVisible == true { QLPreviewPanel.shared()?.orderOut(nil); return }
         updatePreview(); guard !previewURLs.isEmpty else { return }
         QLPreviewPanel.shared()?.makeKeyAndOrderFront(nil)
     }
     func updatePreview() {
-        previewURLs = selected.compactMap(store.url).filter { $0.isFileURL && FileManager.default.fileExists(atPath: $0.path) }
+        previewURLs = selectedLocalURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
         if let preview = QLPreviewPanel.shared() { preview.dataSource = self; preview.delegate = self; preview.reloadData() }
     }
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { previewURLs.count }
@@ -1341,7 +1460,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         confirmRemoval(title: "Remove this shelf?") { [weak self] in guard let self = self else { return }; self.perform { try self.store.change { state in state.groups.removeAll { $0.id == state.active }; state.active = state.groups[0].id } } }
     }
     @objc func showImports(_ sender: Any?) { NSWorkspace.shared.open(store.imports) }
-    @objc func about(_ sender: Any?) { let alert = NSAlert(); alert.messageText = "Apron"; alert.informativeText = "A file shelf for Hangar.\n\nGather files, notes, images and links. Select several items to drag them together. Original files stay in place.\n\nSpace — Quick Look\nReturn — Open\nDelete — Remove from shelf\n⌘Z — Undo last change\n⌘V — Paste\n⌘N — New shelf\n⌘F — Find in shelf\n⇧⌘C — Copy Contents"; alert.beginSheetModal(for: panel) }
+    @objc func about(_ sender: Any?) { let alert = NSAlert(); alert.messageText = "Apron"; alert.informativeText = "A shelf for Hangar.\n\nGather files, text, images and links. Copy or drag text into another app. Original files stay in place.\n\nSpace — Preview\nReturn — Open file or copy text\nDelete — Remove from shelf\n⌘Z — Undo last change\n⌘V — Paste\n⌘N — New shelf\n⌘F — Find in shelf\n⌘C — Copy\n⇧⌘C — Copy Contents"; alert.beginSheetModal(for: panel) }
 }
 
 
@@ -1386,6 +1505,17 @@ func runStorageTests() throws {
     try require(restarted.state == before, "failed write does not mutate visible state")
     let recovery = try ShelfStore(directory: root.appendingPathComponent("recovery"))
     try recovery.addText("first note")
+    try recovery.addData(Data("  Legacy note 日本語\r\nSecond line 🛫  ".utf8), name: "Old note.txt", kind: .text)
+    let legacy = try ShelfStore(directory: recovery.directory)
+    let reopenedText = try legacy.text(for: legacy.items[1])
+    try require(reopenedText == "  Legacy note 日本語\r\nSecond line 🛫  ", "old saved text files reopen as snippets with whitespace and Unicode intact")
+    try recovery.remove(ids: [legacy.items[1].id])
+    let largeLegacyData = Data(repeating: 65, count: 16 * 1024 * 1024 + 1)
+    try recovery.addData(largeLegacyData, name: "Large legacy note.txt", kind: .text)
+    let largeLegacy = try ShelfStore(directory: recovery.directory)
+    let reopenedLargeText = try largeLegacy.text(for: largeLegacy.items[1])
+    try require(reopenedLargeText.utf8.count == largeLegacyData.count, "text imported under the historical size limit remains readable")
+    try recovery.remove(ids: [largeLegacy.items[1].id])
     let firstGroup = recovery.state.active
     try recovery.newGroup(name: "Trip ✈︎")
     try recovery.addText("second note")
@@ -1606,6 +1736,11 @@ func runPasteboardTests() throws {
     defer { board.releaseGlobally() }
     guard board.setString("A clipboard note 🛫", forType: .string) else { throw ShelfError.invalid("The tool sandbox denied private pasteboard access. Run this native integration test from a normal macOS session.") }
     try require(controller.importPasteboard(board) && store.items.count == 1 && store.items[0].kind == .text, "native plain-text pasteboard import")
+    let textDrag = controller.collectionView(controller.grid, pasteboardWriterForItemAt: IndexPath(item: 0, section: 0))!
+    board.clearContents(); board.writeObjects([textDrag])
+    try require(board.string(forType: .string) == "A clipboard note 🛫" && board.data(forType: .fileURL) == nil, "dragging captured text exports plain text without a file URL")
+    let textCell = ShelfThumbnail(); textCell.configure(store.items[0], url: store.url(for: store.items[0]), style: .compact)
+    try require(textCell.picture.isHidden && textCell.nameLabel.stringValue == "Text", "captured text has a snippet preview rather than a document icon and filename")
     board.clearContents(); board.setString("https://example.com/pasteboard", forType: .URL)
     try require(controller.importPasteboard(board) && store.items.count == 2 && store.items[1].kind == .link, "native web URL pasteboard import")
     let image = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 8, bitsPerPixel: 32)!
@@ -1621,6 +1756,19 @@ func runPasteboardTests() throws {
     missingCell.configure(missing, url: store.url(for: missing), style: .compact)
     try require(missingCell.view.accessibilityLabel()?.contains("missing file") == true && missingCell.view.accessibilityHelp()?.contains("Locate Original") == true, "missing original announces recovery action")
     let importedItems = store.items
+    try controller.writeItems([importedItems[0]], to: board)
+    try require(board.string(forType: .string) == "A clipboard note 🛫" && board.data(forType: .fileURL) == nil, "normal Copy exports captured text rather than its private backing file")
+    try controller.writeItems([importedItems[0], importedItems[3]], to: board)
+    try require(board.pasteboardItems?.count == 2 && board.pasteboardItems?[0].string(forType: .string) == "A clipboard note 🛫" && board.pasteboardItems?[0].data(forType: .fileURL) == nil && board.pasteboardItems?[1].string(forType: .fileURL) == original.absoluteString, "mixed Copy preserves text and original file representations")
+    let secondNote = "  Second note 日本語\r\nWith a new line 🛫  "
+    try store.addText(secondNote)
+    let secondText = store.items.last!
+    try controller.writeItems([importedItems[0], secondText], to: board)
+    try require(board.pasteboardItems?.count == 1 && board.string(forType: .string) == "A clipboard note 🛫\n\n" + secondNote && board.data(forType: .fileURL) == nil, "multiple text snippets copy together with exact content and a paragraph separator")
+    let unavailable = ShelfItem(kind: .text, name: "Lost note", location: "gone.txt")
+    do { try controller.writeItems([unavailable], to: board); throw ShelfError.invalid("missing text must refuse Copy") }
+    catch { try require(board.string(forType: .string) == "A clipboard note 🛫\n\n" + secondNote, "failed text Copy preserves the previous clipboard contents") }
+    try store.remove(ids: [secondText.id]); controller.refresh()
     try controller.writeContents(of: importedItems[0], to: board)
     try require(board.string(forType: .string) == "A clipboard note 🛫" && board.data(forType: .fileURL) == nil, "Copy Contents writes note text, not a file reference")
     try controller.writeContents(of: importedItems[1], to: board)
@@ -1645,7 +1793,7 @@ func runPasteboardTests() throws {
     let provider = NSFilePromiseProvider(fileType: UTType.plainText.identifier, delegate: writer)
     board.clearContents(); board.writeObjects([provider])
     try require(!controller.importPasteboard(board) && store.items.count == 4, "promise-only clipboard is safely refused outside a real drag session")
-    print("PASS: actual AppKit pasteboard text, web link, PNG and original-file imports; promise-only clipboard safely requires a drag; contents payloads and filtered selection/drag identity")
+    print("PASS: actual AppKit pasteboard imports; plain-text snippet drag/Copy and mixed file Copy; Unicode/newlines, failed Copy recovery, contents payloads and filtered selection identity")
     withExtendedLifetime(writer) {}; withExtendedLifetime(provider) {}
 }
 

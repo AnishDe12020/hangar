@@ -18,10 +18,10 @@ Hangar is a source kit. Install it from an extracted release folder or a clone a
 
 You need macOS 13+, [Homebrew](https://brew.sh), and Apple's Command Line Tools (`xcode-select --install`). Optional apps have their own requirements; Tinycast and Thaw need macOS 26+. The installer uses Python 3.11+ and compiles its native Swift helpers on your Mac. Helpers are ad-hoc signed locally; this is not a notarized application download.
 
-Install the [2026.10.05.4 preview](https://github.com/AnishDe12020/hangar/releases/tag/v2026.10.05.4) with one command (no GitHub CLI or Hangar Homebrew formula needed):
+Install the [2026.10.05.5 preview](https://github.com/AnishDe12020/hangar/releases/tag/v2026.10.05.5) with one command (no GitHub CLI or Hangar Homebrew formula needed):
 
 ```sh
-(set -eu; k="$HOME/Library/Application Support/Hangar/kits"; mkdir -p "$k"; d="$(mktemp -d "$k/release.XXXXXX")"; cd "$d"; r="https://github.com/AnishDe12020/hangar/releases/download/v2026.10.05.4"; a="Hangar-2026.10.05.4-candidate.zip"; curl -fL "$r/$a" -o "$a"; curl -fL "$r/$a.sha256" -o "$a.sha256"; shasum -a 256 -c "$a.sha256"; ditto -x -k "$a" .; bash Hangar-2026.10.05.4-candidate/install.command)
+(set -eu; k="$HOME/Library/Application Support/Hangar/kits"; mkdir -p "$k"; d="$(mktemp -d "$k/release.XXXXXX")"; cd "$d"; r="https://github.com/AnishDe12020/hangar/releases/download/v2026.10.05.5"; a="Hangar-2026.10.05.5-candidate.zip"; curl -fL "$r/$a" -o "$a"; curl -fL "$r/$a.sha256" -o "$a.sha256"; shasum -a 256 -c "$a.sha256"; ditto -x -k "$a" .; bash Hangar-2026.10.05.5-candidate/install.command)
 ```
 
 This downloads the versioned source archive, verifies its checksum, and runs the installer. Homebrew is still used for dependencies. Read [what installation changes](docs/installation.md) first; after installation, complete the permissions and setup steps below. The source kit is retained under `~/Library/Application Support/Hangar/kits` so future settings changes and updates can rebuild the helpers. Active configuration and rollback backups live separately.
@@ -58,7 +58,9 @@ Press **Control + Option + Command + A** to open the file shelf, then drop in fi
 
 `hangar shelf /path/to/file` adds files from Terminal or an agent. Shelf contents stay on this Mac, outside your dotfiles configuration. When enabled, Apron stays resident to detect a deliberate shake while dragging; it uses an event observer rather than an idle polling timer. Disable it in Ground Control to stop the helper.
 
-Use **Command+F** to filter the current shelf. **Share…** opens the native macOS sharing picker; **Copy Contents** copies a single saved text, image or link directly. **Copy Items** continues to copy file references.
+Pasted or dragged text stays a text snippet: **Command+C**, **Return**, drag-out and **Share…** use its text directly. **Space** opens a selectable full-text preview. Select several snippets to copy them together, separated by a blank line. Actual files still copy and drag as file references.
+
+Use **Command+F** to filter the current shelf. **Share…** opens the native macOS sharing picker; **Copy Contents** copies a single image or link directly. Apron fades and lifts gently into view; Reduce Motion disables the entrance animation.
 
 The **Quick Tools** submenu creates new files: resize/optimize an image to JPEG or PNG, merge selected PDFs in shelf order, extract a page range such as `1, 3–5`, or bundle files and folders into a portable ZIP. Choose a new filename; originals and existing outputs are never replaced. Finished copies appear on the shelf. Image optimization applies orientation, converts to sRGB and removes source metadata/location information; JPEG flattens transparency onto white. Animated images and encrypted PDFs are refused. See [limits](docs/limitations.md) for size bounds.
 
