@@ -141,17 +141,27 @@ final class GroundControl: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         load()
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return true
+        bringForward(); return true
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !busy }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let window = window, window.isVisible || busy else { return .terminateNow }
         return windowShouldClose(window) ? .terminateNow : .terminateCancel
     }
+    func bringForward() {
+        guard !preview else { return }
+        if let modal = NSApp.modalWindow {
+            // Reopening must keep the current dialog as the keyboard target.
+            modal.makeKeyAndOrderFront(nil)
+        } else if window.attachedSheet == nil {
+            window.makeKeyAndOrderFront(nil)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
     func requestNavigation(_ page: String) {
         guard settingsPages.contains(page) else { return }
         pendingNavigation = page
-        if !preview { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+        bringForward()
         applyPendingNavigation()
     }
     func applyPendingNavigation() {

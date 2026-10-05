@@ -18,10 +18,10 @@ Hangar is a source kit. Install it from an extracted release folder or a clone a
 
 You need macOS 13+, [Homebrew](https://brew.sh), and Apple's Command Line Tools (`xcode-select --install`). Optional apps have their own requirements; Tinycast and Thaw need macOS 26+. The installer uses Python 3.11+ and compiles its native Swift helpers on your Mac. Helpers are ad-hoc signed locally; this is not a notarized application download.
 
-Install the [2026.10.05.3 preview](https://github.com/AnishDe12020/hangar/releases/tag/v2026.10.05.3) with one command (no GitHub CLI or Hangar Homebrew formula needed):
+Install the [2026.10.05.4 preview](https://github.com/AnishDe12020/hangar/releases/tag/v2026.10.05.4) with one command (no GitHub CLI or Hangar Homebrew formula needed):
 
 ```sh
-(set -eu; k="$HOME/Library/Application Support/Hangar/kits"; mkdir -p "$k"; d="$(mktemp -d "$k/release.XXXXXX")"; cd "$d"; r="https://github.com/AnishDe12020/hangar/releases/download/v2026.10.05.3"; a="Hangar-2026.10.05.3-candidate.zip"; curl -fL "$r/$a" -o "$a"; curl -fL "$r/$a.sha256" -o "$a.sha256"; shasum -a 256 -c "$a.sha256"; ditto -x -k "$a" .; bash Hangar-2026.10.05.3-candidate/install.command)
+(set -eu; k="$HOME/Library/Application Support/Hangar/kits"; mkdir -p "$k"; d="$(mktemp -d "$k/release.XXXXXX")"; cd "$d"; r="https://github.com/AnishDe12020/hangar/releases/download/v2026.10.05.4"; a="Hangar-2026.10.05.4-candidate.zip"; curl -fL "$r/$a" -o "$a"; curl -fL "$r/$a.sha256" -o "$a.sha256"; shasum -a 256 -c "$a.sha256"; ditto -x -k "$a" .; bash Hangar-2026.10.05.4-candidate/install.command)
 ```
 
 This downloads the versioned source archive, verifies its checksum, and runs the installer. Homebrew is still used for dependencies. Read [what installation changes](docs/installation.md) first; after installation, complete the permissions and setup steps below. The source kit is retained under `~/Library/Application Support/Hangar/kits` so future settings changes and updates can rebuild the helpers. Active configuration and rollback backups live separately.

@@ -269,7 +269,7 @@ enum ShelfQuickTools {
         try runDitto(["-c", "-k", "--norsrc", "--noextattr", staging.path, archive.path], cancel: cancel, log: scratch.appendingPathComponent("ditto.log"), didLaunch: didLaunch)
         let data = try readBoundedFile(archive, limit: maxInputBytes)
         try saveNew(data, to: output, inputs: inputs, cancel: cancel)
-        return ToolResult(url: output, detail: "\(inputs.count) selected items · \(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file))\nOriginal files are unchanged. Duplicate names are numbered in the archive.")
+        return ToolResult(url: output, detail: "\(inputs.count) selected \(inputs.count == 1 ? "item" : "items") · \(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file))\nOriginal files are unchanged. Duplicate names are numbered in the archive.")
     }
     static func optimizeImage(_ input: URL, to output: URL, jpeg: Bool, maxDimension: Int?, quality: Double, cancel: ToolCancellation) throws -> ToolResult {
         try validateDestination(output, inputs: [input]); try cancel.check()
@@ -1109,7 +1109,7 @@ final class ShelfController: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         guard activeTool == nil, panel.attachedSheet == nil, !inputs.isEmpty, inputs.count == selected.count, inputs.count <= 100 else { return }
         let groupID = store.state.active, alert = NSAlert()
         alert.messageText = "Create ZIP"
-        alert.informativeText = "Archive \(inputs.count) selected files or folders into a new ZIP. Originals stay in place.\n\nUp to 128 MB and 4096 entries. Symbolic links and special files are not included; selecting one stops the operation. File contents, names and folders are preserved; Mac resource forks and extended attributes are omitted."
+        alert.informativeText = "Archive \(inputs.count) selected \(inputs.count == 1 ? "file or folder" : "files or folders") into a new ZIP. Originals stay in place.\n\nUp to 128 MB and 4096 entries. Symbolic links and special files are not included; selecting one stops the operation. File contents, names and folders are preserved; Mac resource forks and extended attributes are omitted."
         alert.addButton(withTitle: "Choose Destination…"); alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: panel) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self = self else { return }
